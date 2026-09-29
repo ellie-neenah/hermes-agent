@@ -273,6 +273,16 @@ second Store boolean. Windows Light declares `external` because it has no
 bundled Python checker. Its OS-registered App Installer source still owns
 automatic updates.
 
+### Managed Windows diagnostic boundary
+
+An App Installer/MSIX update is diagnosed by its registered package identity
+(manifest `identity`, publisher, application ID, and package version), not by a
+source checkout receipt. Source updates carry their own correlated update receipt
+and build log under `HERMES_HOME`. Keep those identities separate in support
+evidence: package replacement is normal endpoint-managed behavior; source
+checkout rebuilding is a local staged transaction. Neither path authorizes a
+policy bypass, unsigned package replacement, or writes into a signed payload.
+
 Store builds use `Windows.Services.Store.StoreContext` to check, download,
 and request installation inside Hermes. The native consent UI attaches to the
 current desktop window. Download finishes before backend shutdown; the existing

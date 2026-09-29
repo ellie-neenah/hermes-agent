@@ -393,6 +393,15 @@ Windows hand-off counts new output in this log as progress; a child that produce
 no output is still subject to the idle watchdog. Process liveness alone does not
 reset that watchdog, and cancelling an update does not wait for its build to finish.
 
+On managed Windows, the updater does not start a replacement local backend
+while a live update marker still owns the runtime. A bounded wait that remains
+blocked is reported as an update/recovery failure rather than treated as a
+generic backend timeout. The previous Desktop stays available; read
+`logs/update.log`, resolve the recorded first failure, and retry from the
+installation owner. App Installer/MSIX updates remain package-owned, while
+source checkout updates use the staged source-build path described in the
+[Windows guide](./windows-native.md#managed-windows-updates-and-recovery).
+
 The desktop app and the Hermes backend it talks to update on separate clocks — the app package on your machine, the backend wherever it runs. When more than one update target exists (a remote gateway, or several registered gateways), the update affordances (**Update now** on the About panel, the ⌘K **Update Hermes** row, and the update-ready toast) update **everything**: the connected backend first, then every other eligible registered gateway (Hermes Cloud entries are platform-managed and skipped), and the desktop app itself last, since applying the client update relaunches the app. Single-machine installs keep the one-button experience.
 
 After any backend update, the app also re-checks its own version and warns with a one-click **Update desktop app** action if the GUI is still behind — so updating a remote backend can never silently leave you on a stale desktop build.

@@ -13,7 +13,7 @@ import assert from 'node:assert/strict'
 
 import { test } from 'vitest'
 
-import { updateGateReason, waitForUpdateClearance } from './update-gate'
+import { backendStartAllowedAfterUpdateWait, updateGateReason, waitForUpdateClearance } from './update-gate'
 
 function deps(marker: boolean, inFlight: boolean, handoffActive = false) {
   return {
@@ -272,4 +272,12 @@ test('abandonOn declining keeps the historical parking', async () => {
 
   assert.equal(outcome, 'finished')
   assert.equal(ticks, 2)
+})
+
+test('does not authorize a backend start while the update gate remains closed', () => {
+  assert.equal(backendStartAllowedAfterUpdateWait('clear'), true)
+  assert.equal(backendStartAllowedAfterUpdateWait('finished'), true)
+  assert.equal(backendStartAllowedAfterUpdateWait('abandoned'), false)
+  assert.equal(backendStartAllowedAfterUpdateWait('cancelled'), false)
+  assert.equal(backendStartAllowedAfterUpdateWait('timeout'), false)
 })

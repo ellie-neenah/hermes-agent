@@ -25,3 +25,13 @@ Windows artifacts are signed universal `.msixbundle` files. macOS artifacts are 
 The native drivers run only on disposable GitHub Actions hosts. They verify old installation identity/provenance, click the actual in-app Update control, and observe native package replacement plus automatic relaunch. The driver must not launch the new app or manually start the relaunch waiter as the pass signal. New process identity, payload provenance, version/commit, backend health, and preserved user/plugin state must all agree. Recordings and logs use the existing per-leg artifact/report conventions.
 
 Unit tests of feed/manifest helpers use transport fixtures only. Passing them does not prove native signing, deployment, update, or relaunch. A green merge/typecheck does not establish those properties either. Each release acceptance claim needs a real native run and its parsed receipts.
+
+## Windows ownership diagnostic
+
+Record the installed MSIX identity (`identity`, `publisher`, `applicationId`),
+package version, and the receipt correlation for the same acceptance run. Do
+not use a source-checkout update receipt as evidence for a signed App Installer
+replacement, or vice versa: the package endpoint owns normal MSIX updates while
+source builds use a staged local checkout transaction. A recovery report must
+preserve the first causal failure and prove that the previous active artifact
+remained available when the replacement did not complete.

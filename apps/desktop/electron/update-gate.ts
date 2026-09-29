@@ -81,6 +81,11 @@ export function updateGateReason(deps: UpdateGateDeps): UpdateGateReason {
 
 export type UpdateClearanceOutcome = 'clear' | 'finished' | 'timeout' | 'cancelled' | 'abandoned'
 
+/** A stale marker may self-heal, but it never authorizes a backend while live. */
+export function backendStartAllowedAfterUpdateWait(outcome: UpdateClearanceOutcome): boolean {
+  return outcome === 'clear' || outcome === 'finished'
+}
+
 export interface WaitForUpdateClearanceOptions {
   signal?: AbortSignal
   isCancelled?: () => boolean
@@ -104,10 +109,10 @@ export interface WaitForUpdateClearanceOptions {
  *
  * Returns 'clear' when the gate was already open (no wait happened),
  * 'finished' when it opened during the wait, 'abandoned' when `abandonOn`
- * accepted the closed-gate reason, and 'timeout' when the deadline
- * expired with the gate still closed (callers proceed anyway — matching the
- * long-standing marker-gate behavior, since a wedged updater must not brick
- * the app forever).
+ * accepted the closed-gate reason, and 'timeout' when the deadline expired
+ * with the gate still closed. Neither timeout, cancellation, nor abandonment
+ * authorizes a backend start; callers may only proceed through their explicit
+ * recovery path after inspecting the outcome.
  */
 export async function waitForUpdateClearance(
   deps: UpdateGateDeps,

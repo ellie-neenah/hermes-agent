@@ -76,6 +76,35 @@ bundled runtime does not run Git against package files.
 checkout through the scripts. Do not confuse it with the self-contained MSIX
 package. See [Updating & Uninstalling](../getting-started/updating.md).
 
+### Managed Windows updates and recovery
+
+Use the update owner that installed Hermes. A signed **MSIX/App Installer**
+installation is package-owned: App Installer (or Microsoft Store) checks its
+registered endpoint, preserves the package identity, and replaces the signed
+bundle. Do not run `hermes update` against package files or work around an
+endpoint policy to replace them.
+
+A script-installed **source checkout** is different: `hermes update` builds its
+frontend products in a staged location and publishes a rebuilt Desktop only
+after the build and integrity checks succeed. If any source build step fails,
+the previously active Desktop remains usable and the staged output is removed.
+The update result includes the first failing build detail; use it together with
+`%LOCALAPPDATA%\hermes\logs\update.log` when reporting or retrying the failure.
+
+On managed endpoints, Hermes uses its paired, versioned managed Node runtime
+for source Desktop build/package commands rather than trying to invoke an
+`npm.cmd` shim that policy can block. If that paired runtime is incomplete,
+repair it with `hermes pm doctor` and `hermes pm install`; do not disable script
+execution policy, add a system Node as a workaround, or copy files into an MSIX
+payload.
+
+For an installation identity check, distinguish the source checkout shown in
+the data layout below from a package registered by Windows. In PowerShell,
+`Get-AppxPackage *Hermes* | Select Name, PackageFamilyName, Version` reports
+the installed MSIX identity and version. The update receipt/log belongs to the
+source installation's `HERMES_HOME`; do not mix a receipt from one installation
+with another package's version.
+
 ### Dependency bootstrap
 
 PM owns managed tools. Feature code asks PM for the package it needs

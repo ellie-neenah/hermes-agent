@@ -425,6 +425,7 @@ import {
 } from './pool-spawn-coordinator'
 import { createPoolStopper } from './pool-stop'
 import { poolTouchKeys } from './pool-touch-scope'
+import { startPoolBackendAfterUpdateClearance } from './pool-update-gate'
 import { createPortalSession } from './portal-session'
 import { createKeepAwake } from './power-save'
 import { readPreUpdateBackupEnabled } from './pre-update-backup-config'
@@ -559,7 +560,7 @@ import {
   windowOpacityFor,
   windowOpacityOptions
 } from './translucency'
-import { updateGateReason, waitForUpdateClearance } from './update-gate'
+import { backendStartAllowedAfterUpdateWait, updateGateReason, waitForUpdateClearance } from './update-gate'
 import { readLiveUpdateMarker, updateHandoffConflict, writeUpdateMarker } from './update-marker'
 import { updateConnectionsBeforeLocal } from './update-order'
 import {
@@ -2981,16 +2982,14 @@ async function waitForUpdateToFinish() {
     rememberLog(`[updates] could not read hand-off result: ${err.message}`)
   }
 
-  if (outcome === 'cancelled') {
-    localBackendLifecycle.assertCanStart()
-  }
-
-  if (outcome === 'clear') {
+  if (backendStartAllowedAfterUpdateWait(outcome) && outcome === 'clear') {
     return false
   }
 
-  if (outcome === 'timeout') {
-    rememberLog('[updates] update still in progress after wait timeout; starting backend anyway')
+  if (!backendStartAllowedAfterUpdateWait(outcome) && outcome !== 'abandoned') {
+    const reason = outcome === 'timeout' ? 'is still in progress after the bounded wait' : 'was cancelled'
+    rememberLog(`[updates] refusing backend start because the update ${reason}`)
+    throw new Error(`Hermes update ${reason}. Keep the previous app open and check the update log before retrying.`)
   } else if (parkedOnFailedReceipt) {
     // The gate closed on a terminal failure, not a live update: no swap to
     // relaunch into (the update never succeeded), so boot the current build
@@ -12459,10 +12458,12 @@ async function runPoolBackendStart(
   // during applyUpdates' critical section starts a backend on the runtime
   // being replaced. No boot-progress UI here — pool backends boot
   // silently for background profiles — so we only log while parked.
+  let updateClearance
+
   {
     let poolAnnounced = false
 
-    await waitForUpdateClearance(updateGateDeps(), {
+    updateClearance = await waitForUpdateClearance(updateGateDeps(), {
       signal: localBackendLifecycle.signal,
       isCancelled: (): boolean => backendPool.get(poolKey) !== entry,
       onWaitTick: reason => {
@@ -12509,8 +12510,11 @@ async function runPoolBackendStart(
   const parentIdentityEnv = parentWatchdogEnv(process.pid, parentStartMarker, backendNonce)
   assertPoolEntryStillOwned(poolKey, entry, backendPool, localBackendLifecycle.signal)
 
-  const child = spawnOwnedBackend(
-    windowsShellCommand(backend.command, Boolean(backend.shell)),
+  const child = await startPoolBackendAfterUpdateClearance(
+    updateClearance,
+    () => !updateGateReason(updateGateDeps()),
+    () => spawnOwnedBackend(
+      windowsShellCommand(backend.command, Boolean(backend.shell)),
     backend.args,
     hiddenWindowsChildOptions({
       cwd: hermesCwd,
@@ -12539,7 +12543,11 @@ async function runPoolBackendStart(
       ),
       shell: backend.shell,
       stdio: ['ignore', 'pipe', 'pipe']
-    })
+      }),
+    ),
+    outcome => rememberLog(
+      `[updates] refusing pool backend start for profile "${profile}" because update clearance was ${outcome}; retry after the update finishes`
+    )
   )
 
   entry.process = child

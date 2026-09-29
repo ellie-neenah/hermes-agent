@@ -1540,6 +1540,109 @@ def _diagnose_esbuild_ignore_scripts(output: Optional[str]) -> None:
     print("    or stage the binary directly: `node node_modules/esbuild/install.js` in apps/desktop.")
 
 
+class ManagedDesktopNpmError(RuntimeError):
+    """A policy-blocked managed npm shim cannot be safely bypassed."""
+
+
+_MANAGED_WINDOWS_NPM = re.compile(r"^npm-(?P<version>[^-]+)-win32-(?P<arch>[^-]+)$", re.IGNORECASE)
+
+
+def _managed_pm_entry(fact: object, *, package: str, store: Path) -> Path:
+    """Return one PM-fact-owned store entry or fail closed."""
+    if not isinstance(fact, dict) or not isinstance(fact.get("entry"), str):
+        raise ManagedDesktopNpmError(
+            f"The managed npm.cmd shim has no PM-selected {package} runtime record. "
+            "Repair the managed Hermes runtime, then retry; do not bypass endpoint policy."
+        )
+
+    entry = fact["entry"]
+    if entry in ("", ".", "..") or any(char in entry for char in "/\\:"):
+        raise ManagedDesktopNpmError(
+            f"The managed npm.cmd shim has an invalid PM-selected {package} runtime record. "
+            "Repair the managed Hermes runtime, then retry; do not bypass endpoint policy."
+        )
+
+    candidate = store / entry
+    try:
+        if not candidate.is_dir() or not candidate.resolve().is_relative_to(store.resolve()):
+            raise ValueError
+    except (OSError, ValueError):
+        raise ManagedDesktopNpmError(
+            f"The managed npm.cmd shim has an incomplete PM-selected {package} runtime at {candidate}. "
+            "Repair the managed Hermes runtime, then retry; do not bypass endpoint policy."
+        ) from None
+    return candidate
+
+
+def _npm_command(npm: str, *, windows: bool | None = None) -> list[str]:
+    """Resolve the paired Node invocation for a managed Windows npm.cmd shim.
+
+    Source desktop build/package commands must not invoke ``npm.cmd`` because managed
+    Windows endpoint policy can block the batch shim. Only the PM versioned layout is
+    recognized: an unrelated npm.cmd retains its normal invocation. Once that managed
+    layout is recognized, never fall back to the blocked shim or silently select a
+    different Node version.
+    """
+    npm_path = Path(npm)
+    is_windows = os.name == "nt" if windows is None else windows
+    if not (is_windows and npm_path.suffix.lower() == ".cmd"):
+        return [npm]
+
+    match = _MANAGED_WINDOWS_NPM.match(npm_path.parent.name)
+    if match is None:
+        return [npm]
+
+    _npm_version, arch = match.group("version", "arch")
+    store = npm_path.parent.parent
+    try:
+        from pm.lock import Facts
+
+        facts = Facts(store / "facts.json", strict=True)
+        npm_root = _managed_pm_entry(facts.get("npm"), package="npm", store=store)
+        node_fact = facts.get("node")
+        node_root = _managed_pm_entry(node_fact, package="Node", store=store)
+    except ManagedDesktopNpmError:
+        raise
+    except Exception as error:
+        raise ManagedDesktopNpmError(
+            "The managed npm.cmd shim cannot identify its PM-selected Node runtime. "
+            "Repair the managed Hermes runtime, then retry; do not bypass endpoint policy."
+        ) from error
+
+    try:
+        npm_matches_fact = npm_root.resolve() == npm_path.parent.resolve()
+    except OSError:
+        npm_matches_fact = False
+    if not npm_matches_fact:
+        raise ManagedDesktopNpmError(
+            "The managed npm.cmd shim does not match PM's selected npm runtime; refusing an ambiguous Node pairing. "
+            "Repair the managed Hermes runtime, then retry; do not bypass endpoint policy."
+        )
+
+    expected_target = f"win32-{arch}".lower()
+    npm_fact = facts.get("npm")
+    npm_target = npm_fact.get("target") if isinstance(npm_fact, dict) else None
+    node_target = node_fact.get("target") if isinstance(node_fact, dict) else None
+    if any(not isinstance(target, str) or target.lower() != expected_target for target in (npm_target, node_target)):
+        raise ManagedDesktopNpmError(
+            f"The managed npm.cmd shim has an architecture mismatch: it targets {expected_target}, "
+            f"but PM selected npm/Node for {npm_target or 'an unknown architecture'}/{node_target or 'an unknown architecture'}. "
+            "Repair the managed Hermes runtime, then retry; do not bypass endpoint policy."
+        )
+
+    node = node_root / "node.exe"
+    npm_cli = npm_root / "node_modules" / "npm" / "bin" / "npm-cli.js"
+    if node.is_file() and npm_cli.is_file():
+        return [str(node), str(npm_cli)]
+
+    missing = ", ".join(str(path) for path in (node, npm_cli) if not path.is_file())
+    raise ManagedDesktopNpmError(
+        "The managed npm.cmd shim cannot be used under this Windows endpoint policy, "
+        f"and its PM-selected Node/npm runtimes ({arch}) are incomplete: {missing}. "
+        "Repair the managed Hermes runtime, then retry; do not bypass endpoint policy."
+    )
+
+
 def build_prepared_desktop(desktop_dir: Path, *, source_mode: bool, npm: str, env: dict,
                            icons: Path | None = None) -> Optional[Path]:
     """Build prepared desktop sources, then publish the verified staged app."""
@@ -1567,7 +1670,8 @@ def build_prepared_desktop(desktop_dir: Path, *, source_mode: bool, npm: str, en
         print("  → No Developer ID configured; ad-hoc signing this local rebuild "
               "(CSC_IDENTITY_AUTO_DISCOVERY=false)")
     build_args = ["--icons", str(icons)] if icons else []
-    build_cmd = [npm, "run", "build", "--", *build_args]
+    npm_command = _npm_command(npm)
+    build_cmd = npm_command + ["run", "build", "--", *build_args]
     staging_dir = None if source_mode else _desktop_staging_dir(desktop_dir)
     if staging_dir is not None:
         # electron-builder packs in place; only the verified staging tree may
@@ -1579,7 +1683,7 @@ def build_prepared_desktop(desktop_dir: Path, *, source_mode: bool, npm: str, en
     try:
         run_contained(build_cmd, f"Building desktop {build_label}", cwd=desktop_dir, env=build_env)
         if staging_dir is not None:
-            run_contained([npm, "run", "builder", "--", "--dir", "--publish", "never",
+            run_contained(npm_command + ["run", "builder", "--", "--dir", "--publish", "never",
                            f"-c.directories.output={staging_dir}"], "Packaging the desktop app",
                           cwd=desktop_dir, env=build_env)
         packaged_executable = (
