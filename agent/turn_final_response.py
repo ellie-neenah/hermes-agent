@@ -139,9 +139,6 @@ def finish_text_response(
 
     agent._empty_content_retries = 0
     agent._thinking_prefill_retries = 0
-    # Surface the one-shot fallback switch notice before dropping the retry buffer so a
-    # provider/model switch stays visible on success.
-    agent._emit_pending_fallback_notice()
     agent._clear_status_buffer()
 
     # Defensive: repair malformed role-alternation before API call. Catches cases where the history got
@@ -363,4 +360,7 @@ def finish_text_response(
     _turn_exit_reason = f"text_response(finish_reason={finish_reason})"
     if not agent.quiet_mode:
         agent._safe_print(f"🎉 Conversation completed after {api_call_count} OpenAI-compatible API call(s)")
+    # Surface the one-shot fallback switch only after every finalization guard has accepted
+    # this reply. A continuation/retry is not a successful fallback response yet.
+    agent._emit_pending_fallback_notice()
     return _verdict("break")

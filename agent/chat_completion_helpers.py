@@ -2180,6 +2180,13 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None, reset_a
             # provenance so the restore path only emits a recovery notice after a real fallback.
             agent._provider_fallback_active = True
             agent._provider_fallback_route = (str(fb_model), str(fb_provider))
+            from hermes_cli.providers import normalize_provider
+            agent._confirmed_copilot_openai_billing_fallback = (
+                getattr(reason, "value", reason) == "billing"
+                and not billing_unverified
+                and normalize_provider(old_provider) == "github-copilot"
+                and fb_provider == "openai"
+            )
             _log_fallback_activated(agent, reason, old_model, old_provider, fb_model, fb_provider)
             from hermes_cli.observability.shared_metrics_events import record_fallback
             record_fallback(from_provider=old_provider, to_provider=fb_provider, reason=reason)

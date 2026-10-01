@@ -204,6 +204,33 @@ def test_flush_discards_pending_fallback_notice():
     assert emitted == []
 
 
+def test_confirmed_billing_notice_is_invalidated_by_terminal_fallback_failure():
+    """A later primary success cannot advertise a fallback that terminally failed."""
+    agent = _make_bare_agent()
+    statuses = []
+    notices = []
+    agent._emit_status = statuses.append
+    agent._emit_notice = notices.append
+    agent._buffer_status("🔄 Primary model failed — switching to fallback: m2 via p2")
+    agent._pending_fallback_notice = "🔄 Switched to fallback model: m1 via p1 → m2 via p2"
+    agent._confirmed_copilot_openai_billing_fallback = True
+
+    agent._flush_status_buffer()
+
+    assert statuses == ["🔄 Primary model failed — switching to fallback: m2 via p2"]
+    assert notices == []
+    assert agent._pending_fallback_notice is None
+    assert agent._confirmed_copilot_openai_billing_fallback is False
+
+    agent._emit_pending_fallback_notice()
+
+    assert notices == []
+    assert agent._confirmed_copilot_openai_billing_fallback is False
+
+    agent._emit_pending_fallback_notice()
+    assert notices == []
+
+
 
 
 def test_flush_swallows_callback_exceptions():

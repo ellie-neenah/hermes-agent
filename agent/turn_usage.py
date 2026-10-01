@@ -22,6 +22,41 @@ from agent.usage_pricing import estimate_usage_cost, normalize_usage, with_serve
 logger = logging.getLogger("agent.conversation_loop")
 
 
+def maybe_emit_context_pressure(agent: Any, compressor: Any, *, prompt_tokens: Any) -> None:
+    """Emit one session-local notice from the acting provider's confirmed usage.
+
+    The caller supplies the un-folded aggregator usage on MoA turns: reference
+    advisor accounting is reported elsewhere, but is not part of the context
+    window in which the aggregator acts.
+    """
+    if getattr(agent, "_context_pressure_notified", False):
+        return
+    if not isinstance(prompt_tokens, int) or prompt_tokens < 0:
+        return
+    context_window = getattr(compressor, "context_length", None)
+    if not isinstance(context_window, int) or context_window <= 0:
+        return
+    percent = prompt_tokens * 100 // context_window
+    if percent < 60:
+        return
+
+    # Latch before invoking external presentation code: a callback must not
+    # turn repeated provider responses into duplicate notices.
+    agent._context_pressure_notified = True
+    text = f"{percent} provider-confirmed"
+    emit = getattr(agent, "_emit_status_kind", None)
+    if callable(emit):
+        try:
+            emit("context_pressure", text, origin="maybe_emit_context_pressure")
+        except Exception:
+            logger.debug("Context-pressure status emission failed", exc_info=True)
+    elif callable(callback := getattr(agent, "status_callback", None)):
+        try:
+            callback("context_pressure", text)
+        except Exception:
+            logger.debug("Context-pressure callback failed", exc_info=True)
+
+
 def _agent_session_source(agent: Any) -> str:
     """The surface the agent's own row create would stamp (``_ensure_db_session``), so an
     accounting guard that wins the row-creation race never mints an anonymous session."""
@@ -123,7 +158,23 @@ def record_response_usage(
     _completed_compaction_pending = bool(
         getattr(compressor, "_verify_compaction_cleared_threshold", False)
     )
-    compressor.update_from_response(usage_dict)
+    # The compressor governs the acting request's context, not advisor fan-out
+    # accounting. Keep folded usage for totals/costs below, but feed only the
+    # aggregator's provider-confirmed usage into its state machine.
+    compressor_usage_dict = {
+        "prompt_tokens": aggregator_usage.prompt_tokens,
+        "completion_tokens": aggregator_usage.output_tokens,
+        "total_tokens": aggregator_usage.total_tokens,
+        "input_tokens": aggregator_usage.input_tokens,
+        "output_tokens": aggregator_usage.output_tokens,
+        "cache_read_tokens": aggregator_usage.cache_read_tokens,
+        "cache_write_tokens": aggregator_usage.cache_write_tokens,
+        "reasoning_tokens": aggregator_usage.reasoning_tokens,
+    }
+    compressor.update_from_response(compressor_usage_dict)
+    # The acting compressor window contains only the aggregator request; MoA advisor
+    # usage remains in aggregate accounting but cannot signal aggregator context pressure.
+    maybe_emit_context_pressure(agent, compressor, prompt_tokens=aggregator_usage.prompt_tokens)
     # Usage-anchored accounting: snapshot exact provider usage against the durable
     # transcript (main-loop ONLY; MoA uses pre-fold aggregator usage). The display meter
     # anchors on the turn's FIRST response: later same-turn responses inflate
@@ -139,12 +190,12 @@ def record_response_usage(
     _compression_threshold = int(getattr(compressor, "threshold_tokens", 0) or 0)
     if _loop_mod()._should_rearm_compression_budget(
         compression_attempts, completed_compaction_pending=_completed_compaction_pending,
-        prompt_tokens=prompt_tokens, threshold_tokens=_compression_threshold,
+        prompt_tokens=aggregator_usage.prompt_tokens, threshold_tokens=_compression_threshold,
     ):
         logger.info(
             "Compression budget rearmed after provider-confirmed "
             "recovery: prompt=%s < threshold=%s (attempts were %s/%s)",
-            f"{prompt_tokens:,}",
+            f"{aggregator_usage.prompt_tokens:,}",
             f"{_compression_threshold:,}",
             compression_attempts,
             max_compression_attempts,

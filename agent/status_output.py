@@ -192,21 +192,40 @@ class StatusOutputMixin:
         state operators must see, unlike the retry chatter ``_clear_status_buffer`` drops. Emitted once, then
         cleared; on terminal failure the buffered switch line is flushed instead (``_flush_status_buffer``)."""
         notice = getattr(self, "_pending_fallback_notice", None)
-        if not notice:
-            return
-        # Clear before emitting so a (swallowed) callback error can't leave a stale re-emit.
-        self._pending_fallback_notice = None
-        for item in notice if isinstance(notice, list) else [notice]:
-            try:
-                self._emit_diagnostic_status(item)
-            except Exception:
-                # One surface failure must not hide later switches from the same chain.
-                continue
+        if notice:
+            # Clear before emitting so a (swallowed) callback error can't leave a stale re-emit.
+            self._pending_fallback_notice = None
+            # The billing fallback has one canonical user-facing AgentNotice.
+            # Its generic route diagnostic must not be shown alongside it.
+            items = [] if getattr(self, "_confirmed_copilot_openai_billing_fallback", False) else (
+                notice if isinstance(notice, list) else [notice]
+            )
+            for item in items:
+                try:
+                    self._emit_diagnostic_status(item)
+                except Exception:
+                    # One surface failure must not hide later switches from the same chain.
+                    continue
+        if getattr(self, "_confirmed_copilot_openai_billing_fallback", False):
+            self._confirmed_copilot_openai_billing_fallback = False
+            from agent.credits_tracker import AgentNotice
+
+            self._emit_notice(AgentNotice(
+                text="⚠ Copilot billing is unavailable; continuing with OpenAI fallback.",
+                level="warn",
+                kind="sticky",
+                key="fallback.copilot-openai.billing",
+                id="fallback.copilot-openai.billing",
+            ))
+            self._copilot_openai_billing_notice_visible = True
 
     def _flush_status_buffer(self) -> None:
         """Emit buffered retry messages — call on terminal failure so the user sees what was tried."""
         # The buffered trace already carries the switch line; drop the one-shot notice.
         self._pending_fallback_notice = None
+        # A terminal fallback failure never reached a successful reply on that
+        # route, so it cannot authorise a later turn to announce billing fallback.
+        self._confirmed_copilot_openai_billing_fallback = False
         buf = getattr(self, "_retry_status_buffer", None)
         if not buf:
             return

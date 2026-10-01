@@ -1,6 +1,9 @@
 """Tests for API-key provider support (z.ai/GLM, Kimi, MiniMax, AI Gateway)."""
 
 import json
+import subprocess
+import sys
+import textwrap
 
 import pytest
 
@@ -60,6 +63,40 @@ def _clear_provider_env(monkeypatch):
 class TestResolveProvider:
     """Test resolve_provider() with new providers."""
 
+    def test_fallback_alias_normalization_does_not_preinitialize_plugin_registry(self):
+        """The fallback module must not load the provider catalog before plugin discovery.
+
+        Import this in a pristine interpreter: importing the helper used to import
+        ``hermes_cli.providers`` at module scope, which could freeze the auth
+        registry while provider plugins were only partly discovered. The later
+        normalization still recognizes the Copilot spelling and DeepInfra has a
+        complete registry/profile once auth initializes.
+        """
+        program = """
+            import sys
+            import agent.chat_completion_helpers
+
+            assert "hermes_cli.providers" not in sys.modules
+
+            from hermes_cli.auth import PROVIDER_REGISTRY
+            from hermes_cli.config import OPTIONAL_ENV_VARS
+            from hermes_cli.providers import normalize_provider
+            from providers import get_provider_profile
+
+            assert normalize_provider("github_copilot") == "github-copilot"
+            profile = get_provider_profile("deepinfra")
+            assert profile is not None
+            assert PROVIDER_REGISTRY["deepinfra"].inference_base_url == profile.base_url
+            assert OPTIONAL_ENV_VARS["DEEPINFRA_API_KEY"]["password"] is True
+        """
+        result = subprocess.run(
+            [sys.executable, "-c", textwrap.dedent(program)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+
 
     def test_alias_zhipu(self):
         assert resolve_provider("zhipu") == "zai"
@@ -109,7 +146,10 @@ class TestResolveProvider:
         assert _normalize_provider("chatgpt") == "openai-codex"
 
     def test_alias_github_copilot(self):
+        from hermes_cli.providers import normalize_provider
+
         assert resolve_provider("github-copilot") == "copilot"
+        assert normalize_provider("github_copilot") == "github-copilot"
 
 
     def test_alias_github_copilot_acp(self):

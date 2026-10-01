@@ -13,6 +13,7 @@ import type { GatewayEventContext } from './types'
 
 vi.mock('@/store/native-notifications', () => ({ dispatchNativeNotification: vi.fn() }))
 vi.mock('@/store/onboarding', () => ({ requestDesktopOnboarding: vi.fn() }))
+vi.mock('@/store/gateway', () => ({ requestGatewayForAgent: vi.fn() }))
 
 const OWNED_REFUSAL =
   'Session 20260909_095312_6b93f5 already has a live owner (tui, pid 32977, lease age 22m). ' +
@@ -111,5 +112,71 @@ describe('gateway `error` event → error card + toast', () => {
     const toast = $notifications.get()[0]
     expect(toast.message).toBe(serverCopy)
     expect(toast.detail).toBeUndefined()
+  })
+})
+
+describe('gateway context-pressure status', () => {
+  function contextPressure(isActiveEvent = true): GatewayEventContext {
+    const payload = { kind: 'context_pressure', text: '60 provider-confirmed' }
+    return {
+      deps: {
+        activeGatewayProfile: 'default',
+        compactedTurnRef: { current: new Set<string>() },
+        failAssistantMessage: vi.fn(),
+        flushQueuedDeltas: vi.fn(),
+        hydrateFromStoredSession: vi.fn(),
+        queryClient: { invalidateQueries: vi.fn() },
+        sessionStateByRuntimeIdRef: { current: new Map() },
+        updateSessionState: vi.fn()
+      } as unknown as GatewayEventContext['deps'],
+      event: { payload, session_id: 'sess-1', type: 'status.update' },
+      explicitSid: 'sess-1',
+      fromActiveSource: () => true,
+      isActiveEvent,
+      occurredAt: 1_700_000_100,
+      payload,
+      scheduleConfigRefresh: vi.fn(),
+      sessionId: 'sess-1'
+    }
+  }
+
+  it('shows one keyed warning and routes its foreground actions', async () => {
+    const ctx = contextPressure()
+    expect(handleStatusEvent(ctx)).toBe(true)
+    expect(handleStatusEvent(ctx)).toBe(true)
+    const [toast] = $notifications.get()
+    expect($notifications.get()).toHaveLength(1)
+    expect(toast).toMatchObject({
+      id: 'context-pressure:sess-1', kind: 'warning',
+      message: 'Context is 60% full (provider-confirmed).'
+    })
+    expect(toast?.action?.label).toBe('Compress now')
+    expect(toast?.secondaryAction?.label).toBe('Continue knowingly')
+    expect(toast).not.toHaveProperty('tertiaryAction')
+
+    toast?.action?.onClick()
+    const { requestGatewayForAgent } = await import('@/store/gateway')
+    expect(requestGatewayForAgent).toHaveBeenCalledWith(null, 'default', 'session.compress', { session_id: 'sess-1' })
+    toast?.secondaryAction?.onClick()
+    expect($notifications.get()).toHaveLength(0)
+  })
+
+  it('does not offer foreground actions for background context pressure', () => {
+    const ctx = contextPressure(false)
+    ctx.deps.activeGatewayProfile = 'foreground'
+    expect(handleStatusEvent(ctx)).toBe(true)
+    const [toast] = $notifications.get()
+    expect(toast?.action).toBeUndefined()
+    expect(toast?.secondaryAction?.label).toBe('Continue knowingly')
+  })
+
+  it('does not offer destructive actions for an inactive source that collides with the foreground profile', () => {
+    const ctx = contextPressure(true)
+    ctx.fromActiveSource = () => false
+    ctx.deps.activeGatewayProfile = 'foreground'
+    expect(handleStatusEvent(ctx)).toBe(true)
+    const [toast] = $notifications.get()
+    expect(toast?.action).toBeUndefined()
+    expect(toast?.secondaryAction?.label).toBe('Continue knowingly')
   })
 })

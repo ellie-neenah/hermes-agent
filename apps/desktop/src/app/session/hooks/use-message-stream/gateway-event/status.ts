@@ -9,9 +9,10 @@ import { type AgentNoticePayload, clearAgentNotice, nativeNoticeInput, showAgent
 import { clearSettledClarifyRequest } from '@/store/clarify'
 import { reconcileSessionCompacting, setSessionCompacting, takeCompressDeferred } from '@/store/compaction'
 import { refreshBackgroundProcesses } from '@/store/composer-status'
+import { requestGatewayForAgent } from '@/store/gateway'
 import { applyGoalStatusText } from '@/store/goals'
 import { dispatchNativeNotification } from '@/store/native-notifications'
-import { isDiskFullErrorMessage, notify, notifyError } from '@/store/notifications'
+import { dismissNotification, isDiskFullErrorMessage, notify, notifyError } from '@/store/notifications'
 import { requestDesktopOnboarding } from '@/store/onboarding'
 import { flashPetActivity, setPetActivity } from '@/store/pet'
 import { clearAllPrompts } from '@/store/prompts'
@@ -45,6 +46,38 @@ export function handleStatusEvent(ctx: GatewayEventContext): boolean {
   } = deps
 
   if (event.type === 'status.update') {
+    if (sessionId && payload?.kind === 'context_pressure') {
+      const match = /^([0-9]+) provider-confirmed$/.exec(coerceGatewayText(payload?.text).trim())
+
+      if (match) {
+        const percent = Number(match[1])
+        const noticeId = `context-pressure:${sessionId}`
+        const canActOnForegroundSession = isActiveEvent && ctx.fromActiveSource()
+        notify({
+          action: canActOnForegroundSession ? {
+            // This is the same session.compress RPC used by the desktop /compress command.
+            label: 'Compress now',
+            onClick: () => void requestGatewayForAgent(
+              null,
+              deps.activeGatewayProfile,
+              'session.compress',
+              { session_id: sessionId }
+            )
+          } : undefined,
+          durationMs: 0,
+          id: noticeId,
+          kind: 'warning',
+          message: `Context is ${percent}% full (provider-confirmed).`,
+          secondaryAction: {
+            label: 'Continue knowingly',
+            onClick: () => dismissNotification(noticeId)
+          },
+        })
+      }
+
+      return true
+    }
+
     // `compacting`/`compacted` is auto-compaction's pair. Manual /compress
     // pins `compressing` and always clears it with `ready` (the `finally` in
     // methods_session._compress_live). Both spellings drive the same phase —
