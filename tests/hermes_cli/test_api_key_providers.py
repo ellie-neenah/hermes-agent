@@ -109,7 +109,10 @@ class TestResolveProvider:
         assert _normalize_provider("chatgpt") == "openai-codex"
 
     def test_alias_github_copilot(self):
+        from hermes_cli.providers import normalize_provider
+
         assert resolve_provider("github-copilot") == "copilot"
+        assert normalize_provider("github_copilot") == "github-copilot"
 
 
     def test_alias_github_copilot_acp(self):
