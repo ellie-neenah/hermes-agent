@@ -1353,6 +1353,9 @@ def restore_primary_runtime(agent) -> bool:
         logger.info("Primary runtime restored for new turn: %s (%s)", agent.model, agent.provider)
         agent._provider_fallback_active = False
         agent._provider_fallback_route = None
+        # A new turn on the restored primary must not inherit confirmation from
+        # a fallback that was only valid for the prior route.
+        agent._confirmed_copilot_openai_billing_fallback = False
         if provider_fallback_active:
             # Notification surfaces are best-effort and must never undo a successful restore.
             with contextlib.suppress(Exception):
