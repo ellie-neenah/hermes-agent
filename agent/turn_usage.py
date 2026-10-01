@@ -22,6 +22,41 @@ from agent.usage_pricing import estimate_usage_cost, normalize_usage, with_serve
 logger = logging.getLogger("agent.conversation_loop")
 
 
+def maybe_emit_context_pressure(agent: Any, compressor: Any, *, prompt_tokens: Any) -> None:
+    """Emit one session-local notice from the acting provider's confirmed usage.
+
+    The caller supplies the un-folded aggregator usage on MoA turns: reference
+    advisor accounting is reported elsewhere, but is not part of the context
+    window in which the aggregator acts.
+    """
+    if getattr(agent, "_context_pressure_notified", False):
+        return
+    if not isinstance(prompt_tokens, int) or prompt_tokens < 0:
+        return
+    context_window = getattr(compressor, "context_length", None)
+    if not isinstance(context_window, int) or context_window <= 0:
+        return
+    percent = prompt_tokens * 100 // context_window
+    if percent < 60:
+        return
+
+    # Latch before invoking external presentation code: a callback must not
+    # turn repeated provider responses into duplicate notices.
+    agent._context_pressure_notified = True
+    text = f"{percent} provider-confirmed"
+    emit = getattr(agent, "_emit_status_kind", None)
+    if callable(emit):
+        try:
+            emit("context_pressure", text, origin="maybe_emit_context_pressure")
+        except Exception:
+            logger.debug("Context-pressure status emission failed", exc_info=True)
+    elif callable(callback := getattr(agent, "status_callback", None)):
+        try:
+            callback("context_pressure", text)
+        except Exception:
+            logger.debug("Context-pressure callback failed", exc_info=True)
+
+
 def _agent_session_source(agent: Any) -> str:
     """The surface the agent's own row create would stamp (``_ensure_db_session``), so an
     accounting guard that wins the row-creation race never mints an anonymous session."""
