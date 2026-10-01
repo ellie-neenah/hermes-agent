@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from hermes_state import SessionDB
+from run_agent import AIAgent
 from tools.todo_tool import TodoStore
 
 
@@ -255,7 +256,6 @@ def test_new_session_resets_token_counters(tmp_path):
     import types
 
     from agent.context_engine import ContextEngine
-    from run_agent import AIAgent
 
     cli = _prepare_cli_with_active_session(tmp_path)
     agent = cli.agent
@@ -289,6 +289,30 @@ def test_new_session_resets_token_counters(tmp_path):
     assert comp.last_completion_tokens == 0
     assert comp.last_total_tokens == 0
     assert comp.compression_count == 0
+
+
+def test_new_session_rearms_context_pressure_notification(tmp_path):
+    """A real /new reset lets the next session emit its pressure notice."""
+    import types
+
+    from agent.turn_usage import maybe_emit_context_pressure
+
+    cli = _prepare_cli_with_active_session(tmp_path)
+    agent = cli.agent
+    agent.reset_session_state = types.MethodType(AIAgent.reset_session_state, agent)
+    agent._transition_context_engine_session = types.MethodType(
+        AIAgent._transition_context_engine_session, agent
+    )
+    agent._context_pressure_notified = True
+    emitted = []
+    agent.status_callback = lambda kind, text: emitted.append((kind, text))
+    agent.context_compressor.context_length = 1_000
+
+    cli.process_command("/new")
+
+    assert agent._context_pressure_notified is False
+    maybe_emit_context_pressure(agent, agent.context_compressor, prompt_tokens=600)
+    assert emitted == [("context_pressure", "60 provider-confirmed")]
 
 
 def test_new_session_with_title(capsys):
