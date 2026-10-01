@@ -108,6 +108,10 @@ def _sync_auth_registry() -> None:
     for module, attr in (
         ("hermes_cli.auth", "sync_plugin_provider_registry"),
         ("hermes_cli.models_catalog_static", "sync_plugin_provider_catalog"),
+        # config can be imported by entry-point discovery before the bundled
+        # profiles are registered; refresh its idempotent env-var projection
+        # after the complete profile catalog is available.
+        ("hermes_cli.config", "_inject_profile_env_vars"),
     ):
         sync = getattr(sys.modules.get(module), attr, None)
         if sync is None:

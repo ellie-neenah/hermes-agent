@@ -79,6 +79,7 @@ class TestResolveProvider:
             assert "hermes_cli.providers" not in sys.modules
 
             from hermes_cli.auth import PROVIDER_REGISTRY
+            from hermes_cli.config import OPTIONAL_ENV_VARS
             from hermes_cli.providers import normalize_provider
             from providers import get_provider_profile
 
@@ -86,6 +87,7 @@ class TestResolveProvider:
             profile = get_provider_profile("deepinfra")
             assert profile is not None
             assert PROVIDER_REGISTRY["deepinfra"].inference_base_url == profile.base_url
+            assert OPTIONAL_ENV_VARS["DEEPINFRA_API_KEY"]["password"] is True
         """
         result = subprocess.run(
             [sys.executable, "-c", textwrap.dedent(program)],
