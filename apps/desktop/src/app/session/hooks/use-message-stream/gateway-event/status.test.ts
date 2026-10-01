@@ -175,4 +175,15 @@ describe('gateway context-pressure status', () => {
     expect(toast?.tertiaryAction).toBeUndefined()
     expect(toast?.secondaryAction?.label).toBe('Continue knowingly')
   })
+
+  it('does not offer destructive actions for an inactive source that collides with the foreground profile', () => {
+    const ctx = contextPressure(true)
+    ctx.fromActiveSource = () => false
+    ctx.deps.activeGatewayProfile = 'foreground'
+    expect(handleStatusEvent(ctx)).toBe(true)
+    const [toast] = $notifications.get()
+    expect(toast?.action).toBeUndefined()
+    expect(toast?.tertiaryAction).toBeUndefined()
+    expect(toast?.secondaryAction?.label).toBe('Continue knowingly')
+  })
 })

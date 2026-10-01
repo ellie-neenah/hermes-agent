@@ -53,8 +53,9 @@ export function handleStatusEvent(ctx: GatewayEventContext): boolean {
       if (match) {
         const percent = Number(match[1])
         const noticeId = `context-pressure:${sessionId}`
+        const canActOnForegroundSession = isActiveEvent && ctx.fromActiveSource()
         notify({
-          action: isActiveEvent ? {
+          action: canActOnForegroundSession ? {
             // This is the same session.compress RPC used by the desktop /compress command.
             label: 'Compress now',
             onClick: () => void requestGatewayForAgent(
@@ -72,7 +73,7 @@ export function handleStatusEvent(ctx: GatewayEventContext): boolean {
             label: 'Continue knowingly',
             onClick: () => dismissNotification(noticeId)
           },
-          tertiaryAction: isActiveEvent ? {
+          tertiaryAction: canActOnForegroundSession ? {
             // Route through the existing new-chat dispatcher rather than inventing a client-local reset.
             label: 'Start new session',
             onClick: () => requestRoute('/new')
