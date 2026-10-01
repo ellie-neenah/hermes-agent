@@ -217,6 +217,7 @@ class StatusOutputMixin:
                 key="fallback.copilot-openai.billing",
                 id="fallback.copilot-openai.billing",
             ))
+            self._copilot_openai_billing_notice_visible = True
 
     def _flush_status_buffer(self) -> None:
         """Emit buffered retry messages — call on terminal failure so the user sees what was tried."""
