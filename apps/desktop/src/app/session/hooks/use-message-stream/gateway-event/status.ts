@@ -16,7 +16,6 @@ import { dismissNotification, isDiskFullErrorMessage, notify, notifyError } from
 import { requestDesktopOnboarding } from '@/store/onboarding'
 import { flashPetActivity, setPetActivity } from '@/store/pet'
 import { clearAllPrompts } from '@/store/prompts'
-import { requestRoute } from '@/store/recovery-requests'
 import { setTurnStartedAt } from '@/store/session'
 import { clearActiveSessionTodos } from '@/store/todos'
 
@@ -73,11 +72,6 @@ export function handleStatusEvent(ctx: GatewayEventContext): boolean {
             label: 'Continue knowingly',
             onClick: () => dismissNotification(noticeId)
           },
-          tertiaryAction: canActOnForegroundSession ? {
-            // Route through the existing new-chat dispatcher rather than inventing a client-local reset.
-            label: 'Start new session',
-            onClick: () => requestRoute('/new')
-          } : undefined
         })
       }
 

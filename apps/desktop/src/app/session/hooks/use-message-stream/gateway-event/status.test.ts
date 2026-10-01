@@ -14,7 +14,6 @@ import type { GatewayEventContext } from './types'
 vi.mock('@/store/native-notifications', () => ({ dispatchNativeNotification: vi.fn() }))
 vi.mock('@/store/onboarding', () => ({ requestDesktopOnboarding: vi.fn() }))
 vi.mock('@/store/gateway', () => ({ requestGatewayForAgent: vi.fn() }))
-vi.mock('@/store/recovery-requests', () => ({ requestRoute: vi.fn() }))
 
 const OWNED_REFUSAL =
   'Session 20260909_095312_6b93f5 already has a live owner (tui, pid 32977, lease age 22m). ' +
@@ -153,17 +152,13 @@ describe('gateway context-pressure status', () => {
     })
     expect(toast?.action?.label).toBe('Compress now')
     expect(toast?.secondaryAction?.label).toBe('Continue knowingly')
-    expect(toast?.tertiaryAction?.label).toBe('Start new session')
+    expect(toast).not.toHaveProperty('tertiaryAction')
 
     toast?.action?.onClick()
     const { requestGatewayForAgent } = await import('@/store/gateway')
     expect(requestGatewayForAgent).toHaveBeenCalledWith(null, 'default', 'session.compress', { session_id: 'sess-1' })
     toast?.secondaryAction?.onClick()
     expect($notifications.get()).toHaveLength(0)
-    handleStatusEvent(ctx)
-    $notifications.get()[0]?.tertiaryAction?.onClick()
-    const { requestRoute } = await import('@/store/recovery-requests')
-    expect(requestRoute).toHaveBeenCalledWith('/new')
   })
 
   it('does not offer foreground actions for background context pressure', () => {
@@ -172,7 +167,6 @@ describe('gateway context-pressure status', () => {
     expect(handleStatusEvent(ctx)).toBe(true)
     const [toast] = $notifications.get()
     expect(toast?.action).toBeUndefined()
-    expect(toast?.tertiaryAction).toBeUndefined()
     expect(toast?.secondaryAction?.label).toBe('Continue knowingly')
   })
 
@@ -183,7 +177,6 @@ describe('gateway context-pressure status', () => {
     expect(handleStatusEvent(ctx)).toBe(true)
     const [toast] = $notifications.get()
     expect(toast?.action).toBeUndefined()
-    expect(toast?.tertiaryAction).toBeUndefined()
     expect(toast?.secondaryAction?.label).toBe('Continue knowingly')
   })
 })
