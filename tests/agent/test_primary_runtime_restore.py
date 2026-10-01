@@ -105,6 +105,18 @@ class TestRestorePrimaryRuntime:
         assert clears == ["fallback.copilot-openai.billing"]
         assert agent._copilot_openai_billing_notice_visible is False
 
+    def test_failed_restore_keeps_visible_copilot_billing_notice(self):
+        agent = _make_agent()
+        agent._fallback_activated = True
+        agent._copilot_openai_billing_notice_visible = True
+        agent._rate_limited_until = time.monotonic() + 60
+        clears = []
+        agent._emit_notice_clear = clears.append
+
+        assert agent._restore_primary_runtime() is False
+        assert clears == []
+        assert agent._copilot_openai_billing_notice_visible is True
+
 
 
     def test_does_not_label_temporary_model_restore_as_fallback_recovery(self):
