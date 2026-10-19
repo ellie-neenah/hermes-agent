@@ -125,7 +125,7 @@ export function handleStatusEvent(ctx: GatewayEventContext): boolean {
       if (text) {
         flushQueuedDeltas(sessionId)
         updateSessionState(sessionId, state => {
-          if (state.messages.some(message => message.id.startsWith('context-pressure-'))) {
+          if (state.messages.some(message => message.displayKind === 'context_pressure')) {
             return state
           }
 
@@ -135,6 +135,7 @@ export function handleStatusEvent(ctx: GatewayEventContext): boolean {
               ...state.messages,
               {
                 id: `context-pressure-${occurredAt}`,
+                displayKind: 'context_pressure',
                 role: 'system',
                 parts: [textPart(text, occurredAt)],
                 timestamp: occurredAt
