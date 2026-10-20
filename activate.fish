@@ -70,7 +70,13 @@ function hermes --description 'hermes of the activated checkout'
         return 1
     end
     set -l python python
-    if set -q PYTHON
+    if set -q __HERMES_MANAGED_ENVIRONMENT; and test "$__HERMES_MANAGED_ENVIRONMENT" = 1
+        if not set -q PYTHON; or not test -x $PYTHON
+            echo 'hermes: managed environment is missing or corrupt; run `hermes pm repair`' >&2
+            return 1
+        end
+        set python $PYTHON
+    else if set -q PYTHON
         set python $PYTHON
     else if test -x $__hermes_worktree/.venv/bin/python
         set python $__hermes_worktree/.venv/bin/python

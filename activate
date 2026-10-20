@@ -107,7 +107,13 @@ hermes() {
     }
     (
         cd "$__HERMES_WORKTREE" || exit 1
-        if [ -n "${PYTHON-}" ]; then
+        if [ "${__HERMES_MANAGED_ENVIRONMENT:-}" = 1 ]; then
+            if [ -n "${PYTHON:-}" ] && [ -x "$PYTHON" ]; then
+                exec "$PYTHON" hermes "$@"
+            fi
+            printf '%s\n' 'hermes: managed environment is missing or corrupt; run `hermes pm repair`' >&2
+            exit 1
+        elif [ -n "${PYTHON-}" ]; then
             exec "$PYTHON" hermes "$@"
         elif [ -x .venv/Scripts/python.exe ]; then
             exec .venv/Scripts/python.exe hermes "$@"

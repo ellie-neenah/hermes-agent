@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import { chatMessageText, toChatMessages } from '@/lib/chat-messages'
+
 import { handleStatusEvent } from './status'
 import type { GatewayEventContext } from './types'
 
@@ -56,6 +58,49 @@ describe('desktop fallback switch', () => {
     expect(handleStatusEvent(ctx)).toBe(true)
     expect(systemText(updateSessionState)).toContain('qwen3.8-max')
     expect(systemText(updateSessionState)).toMatch(/fallback/i)
+  })
+
+  it('shows a context-pressure intervention in the transcript', () => {
+    const notice = '⚠️ Context capacity is 60% full. Compress now, Start new session, or Continue knowingly.'
+    const { ctx, updateSessionState } = statusContext(notice, 'context_pressure')
+
+    expect(handleStatusEvent(ctx)).toBe(true)
+    expect(systemText(updateSessionState)).toContain('Compress now')
+    expect(systemText(updateSessionState)).toContain('Start new session')
+    expect(systemText(updateSessionState)).toContain('Continue knowingly')
+  })
+
+  it('deduplicates replayed context-pressure status events', () => {
+    const notice = '⚠️ Context capacity is 60% full. Compress now, Start new session, or Continue knowingly.'
+    const { ctx, updateSessionState } = statusContext(notice, 'context_pressure')
+
+    handleStatusEvent(ctx)
+    handleStatusEvent(ctx)
+
+    const first = updateSessionState.mock.calls[0]?.[1]({ messages: [] }) as { messages: unknown[] }
+    const second = updateSessionState.mock.calls[1]?.[1](first) as { messages: unknown[] }
+
+    expect(second.messages).toHaveLength(1)
+  })
+
+  it('does not append a replay after hydrating a durable context-pressure notice', () => {
+    const notice = '⚠️ Context capacity is 60% full. Compress now, Start new session, or Continue knowingly.'
+    const { ctx, updateSessionState } = statusContext(notice, 'context_pressure')
+
+    let state = {
+      messages: toChatMessages([
+        { id: 42, role: 'assistant' as const, content: notice, display_kind: 'context_pressure' as const, timestamp: 3 }
+      ])
+    }
+
+    updateSessionState.mockImplementation((_id, updater) => (state = updater(state) as typeof state))
+
+    handleStatusEvent(ctx)
+
+    expect(state.messages).toHaveLength(1)
+    expect(chatMessageText(state.messages[0]!)).toContain('Compress now')
+    expect(chatMessageText(state.messages[0]!)).toContain('Start new session')
+    expect(chatMessageText(state.messages[0]!)).toContain('Continue knowingly')
   })
 
   it('does not turn unrelated lifecycle status into a transcript line', () => {
