@@ -1763,7 +1763,7 @@ def test_windows_build_under_its_own_desktop_skips_instead_of_killing_it(tmp_pat
                         lambda *a, **k: pytest.fail("must not stop the Desktop running this build"))
     monkeypatch.setattr("pm.progress.run_contained", lambda *a, **k: pytest.fail("must not pack"))
 
-    assert main_desktop.build_prepared_desktop(desktop_dir, source_mode=False, npm="npm", env={}) is None
+    assert main_desktop.build_prepared_desktop(desktop_dir, source_mode=False, npm=["npm"], env={}) is None
     assert "pid 41" in capsys.readouterr().out
     assert not list(desktop_dir.glob(f"{main_desktop._DESKTOP_STAGING_PREFIX}*"))
 
