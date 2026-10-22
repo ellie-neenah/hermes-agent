@@ -12,6 +12,7 @@ import json
 import os
 import re
 import shlex
+from dataclasses import dataclass
 from pathlib import Path
 
 from hermes_constants import get_default_hermes_root, project_venv_dir
@@ -304,6 +305,45 @@ def committed_venv(project_root: Path) -> Path | None:
     return _recorded_venv(project_root) or payload_venv(project_root)
 
 
+class ManagedEnvironmentError(RuntimeError):
+    """The install recorded PM state, but it is not safe to launch from it."""
+
+
+@dataclass(frozen=True)
+class ManagedEnvironment:
+    """The sole launch environment PM committed for an install."""
+
+    environment: Path
+    python: Path
+
+
+def managed_environment(project_root: Path) -> ManagedEnvironment | None:
+    """Return PM's recorded launch environment, never a checkout-local fallback.
+
+    A facts record is PM's ownership marker. Once it exists, a vanished generation
+    or interpreter is damage, not permission to boot an adjacent ``venv`` built by
+    another CPython. Checkouts with no PM record remain developer-owned and retain
+    their historical local-environment behavior.
+    """
+    root = Path(project_root).resolve()
+    facts = runtime_facts_path(root)
+    payload = payload_venv(root)
+    if not facts.exists() and payload is None:
+        return None
+    try:
+        environment = committed_venv(root)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise ManagedEnvironmentError(
+            "managed environment is missing or corrupt; run `hermes pm repair`"
+        ) from exc
+    if environment is None:
+        raise ManagedEnvironmentError("managed environment is missing or corrupt; run `hermes pm repair`")
+    python = venv_python(environment)
+    if not (environment / "pyvenv.cfg").is_file() or not python.is_file():
+        raise ManagedEnvironmentError("managed environment is missing or corrupt; run `hermes pm repair`")
+    return ManagedEnvironment(environment=environment, python=python)
+
+
 def _recorded_venv(project_root: Path) -> Path | None:
     path = runtime_facts_path(project_root)
     try:
@@ -345,7 +385,8 @@ def venv_python(venv: Path, *, windows: bool | None = None) -> Path:
 
 def project_python(project_root: Path) -> Path:
     """The interpreter of the committed dependency environment for *project_root*."""
-    return venv_python(selected_venv(project_root))
+    managed = managed_environment(project_root)
+    return managed.python if managed is not None else venv_python(selected_venv(project_root))
 
 
 def _payload_store_python(root: Path) -> Path | None:
@@ -532,13 +573,20 @@ def activation_environment(project_root: Path) -> dict[str, str]:
     from pm.registry import all_packages
 
     env = env_for(*all_packages())
-    environment = committed_venv(project_root)
+    managed = managed_environment(project_root)
+    environment = managed.environment if managed is not None else None
     env.pop("PYTHONHOME", None)
     env.pop("VIRTUAL_ENV", None)
     # Nothing committed: the child's own hermes_bootstrap decides (a bare store Python refuses),
     # rather than inheriting the pre-PM in-tree venv from here.
     env["PYTHONPATH"] = os.pathsep.join([str(project_root.resolve()),
                                          *([str(site_packages(environment))] if environment else [])])
+    if managed is not None:
+        # Interactive activation and its checkout-local launcher must execute
+        # the exact CPython that owns this selected generation, never a legacy
+        # ``venv``/``.venv`` or the caller's ambient Python.
+        env["PYTHON"] = str(managed.python)
+        env["__HERMES_MANAGED_ENVIRONMENT"] = "1"
     # The child-process sentinel. Its VALUE is the installed-state file this
     # environment was composed against, so a consumer learns that it inherited
     # an activated shell and which checkout/profile that shell came from. Its

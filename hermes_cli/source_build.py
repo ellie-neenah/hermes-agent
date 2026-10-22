@@ -5,6 +5,14 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass
+
+
+def _sanitize_npm_execpath(env: dict[str, str]) -> None:
+    """Remove inherited npm CLI pointers without depending on Windows key casing."""
+    for key in tuple(env):
+        if key.casefold() == "npm_execpath":
+            env.pop(key)
 
 
 def source_product_current(project_root: Path, product: str, out: Path) -> bool:
@@ -45,11 +53,97 @@ def source_build_env(base_env: dict | None = None, *, explicit: bool = False, ve
     vc_runtime = Path(sys.base_prefix) / "vcruntime140.dll"
     if vc_runtime.is_file():
         env["HERMES_VC_RUNTIME"] = str(vc_runtime)
+    # npm inherits this from a parent npm process. It can name a foreign CLI,
+    # so PM setup must neither trust nor propagate it into an update build.
+    _sanitize_npm_execpath(env)
     env.pop("ESBUILD_BINARY_PATH", None)
     npmrc = get_hermes_home() / "npmrc"
     if npmrc.is_file():
         env.setdefault("NPM_CONFIG_USERCONFIG", str(npmrc))
     return ensure("npm", base_env=env, explicit=explicit, verify=verify).env
+
+
+def product_npm_command(project_root: Path, *, env: dict[str, str]) -> list[str]:
+    """Run npm through the PM-owned Node and the shared JS resolver, never its shell wrapper."""
+    from pm import installed_package
+
+    installed = installed_package("node")
+    node = Path(installed.binary) if installed is not None and installed.binary is not None else None
+    resolver = project_root / "scripts" / "build" / "node-deps.mjs"
+    npm_cli = next((candidate for candidate in (
+        node.parent / "node_modules" / "npm" / "bin" / "npm-cli.js" if node else None,
+        node.parent.parent / "lib" / "node_modules" / "npm" / "bin" / "npm-cli.js" if node else None,
+    ) if candidate is not None and candidate.is_file()), None)
+    if node is None or not node.is_file() or npm_cli is None or not resolver.is_file():
+        raise RuntimeError(
+            "Desktop packaging requires the Hermes-managed Node/npm toolchain; contact IT to repair it."
+        )
+    # node-deps.mjs resolves npm's JavaScript entrypoint before it considers PATH.
+    # Pin its first candidate to this verified Node distribution, never npm.cmd.
+    env["npm_execpath"] = str(npm_cli)
+    return [str(node), str(resolver), "--npm"]
+
+
+@dataclass(frozen=True)
+class ProductNpmPreflight:
+    """Read-only result for the exact Node → resolver → npm-cli product vector."""
+
+    node: Path | None
+    npm_cli: Path | None
+    resolver: Path | None
+    ready: bool
+    group_policy_denied: bool
+    detail: str
+
+
+def _windows_group_policy_denial(error: BaseException | str) -> bool:
+    """Whether Windows refused the selected executable under enterprise policy."""
+    if isinstance(error, OSError) and (
+        getattr(error, "winerror", None) == 1260 or error.errno == 1260
+    ):
+        return True  # ERROR_ACCESS_DISABLED_BY_POLICY
+    text = str(error).lower()
+    return "group policy" in text or "applocker" in text or "software restriction" in text
+
+
+def product_npm_preflight(project_root: Path) -> ProductNpmPreflight:
+    """Probe the selected direct product vector without acquiring tools or mutating the checkout.
+
+    The resolver is the one product builds execute.  Running its ``--version`` path proves the
+    managed Node can start both the resolver and its paired JavaScript npm entrypoint without
+    ever dispatching a shell wrapper.
+    """
+    env = dict(os.environ)
+    _sanitize_npm_execpath(env)
+    try:
+        command = product_npm_command(project_root, env=env)
+    except RuntimeError as exc:
+        return ProductNpmPreflight(None, None, None, False, False, str(exc))
+    node, resolver = Path(command[0]), Path(command[1])
+    npm_cli = Path(env["npm_execpath"])
+    try:
+        probe = subprocess.run(
+            [*command, "--version"], cwd=project_root, env=env, capture_output=True,
+            text=True, encoding="utf-8", errors="replace", check=False,
+        )
+    except OSError as exc:
+        return ProductNpmPreflight(node, npm_cli, resolver, False, _windows_group_policy_denial(exc), str(exc))
+    output = "\n".join(part for part in (probe.stdout, probe.stderr) if part).strip()
+    if probe.returncode == 0:
+        return ProductNpmPreflight(node, npm_cli, resolver, True, False, output)
+    return ProductNpmPreflight(
+        node, npm_cli, resolver, False, _windows_group_policy_denial(output),
+        output or f"resolver exited {probe.returncode}",
+    )
+
+
+def is_windows_source_desktop_update(project_root: Path) -> bool:
+    """Whether ``update --plan`` should inspect this mutable Windows Desktop source tree."""
+    if sys.platform != "win32" or not (project_root / "apps" / "desktop" / "package.json").is_file():
+        return False
+    from hermes_cli.config import detect_install_method
+
+    return detect_install_method(project_root) == "git"
 
 
 def run_in_custody(project_root: Path, command: list, label: str, **kwargs):
@@ -65,8 +159,9 @@ def run_in_custody(project_root: Path, command: list, label: str, **kwargs):
         return run_contained(argv, label, **kwargs, **custody)
 
 
-def run_source_script(project_root: Path, script: str, *args: str, env: dict, label: str) -> None:
-    command = [shutil.which("node", path=env["PATH"]), str(project_root / script), *args]
+def run_source_script(project_root: Path, script: str, *args: str, env: dict, label: str,
+                      node: str | None = None) -> None:
+    command = [node or shutil.which("node", path=env["PATH"]), str(project_root / script), *args]
     # npm's deprecation warnings are the loudest lines and never actionable
     # here; they still land in the failure tail.
     run_in_custody(project_root, command, label, hide=lambda line: line.lower().startswith("npm warn"),
@@ -80,12 +175,12 @@ def _install_args(explicit: bool) -> tuple[str, ...]:
 
 
 def prepare_source_dependencies(project_root: Path, workspaces: tuple[str, ...], *, env: dict,
-                                explicit: bool = False) -> None:
+                                explicit: bool = False, node: str | None = None) -> None:
     run_source_script(
         project_root, "scripts/build/node-deps.mjs", "--source", str(project_root), "--reuse",
         *_install_args(explicit),
         *(arg for workspace in workspaces for arg in ("--workspace", workspace)), env=env,
-        label="Preparing Node dependencies",
+        label="Preparing Node dependencies", node=node,
     )
 
 
@@ -99,11 +194,12 @@ def prepare_launch_dependencies(project_root: Path, *, env: dict) -> None:
     prepare_source_dependencies(project_root, workspaces, env=env)
 
 
-def build_source_tui(project_root: Path, *, env: dict) -> None:
-    run_source_script(project_root, "scripts/build/tui.mjs", env=env, label="Building the TUI")
+def build_source_tui(project_root: Path, *, env: dict, node: str | None = None) -> None:
+    run_source_script(project_root, "scripts/build/tui.mjs", env=env, label="Building the TUI", node=node)
 
 
-def build_source_web(project_root: Path, *, env: dict, icons: Path | None = None) -> None:
+def build_source_web(project_root: Path, *, env: dict, icons: Path | None = None,
+                     node: str | None = None) -> None:
     # Bounded build (#63338): the Vite/Rolldown dashboard build saturates small
     # hosts; cap the V8 heap and the native bundler's rayon thread pool.
     from hermes_cli.web_build_limits import apply_web_build_limits
@@ -113,7 +209,7 @@ def build_source_web(project_root: Path, *, env: dict, icons: Path | None = None
     icons = icons or project_root
     run_source_script(project_root, "scripts/build/web.mjs", "--source", str(project_root),
                       "--icons", str(icons), "--out", str(project_root / "hermes_cli/web_dist"), env=env,
-                      label="Building the web UI")
+                      label="Building the web UI", node=node)
 
 
 def build_source_webapp(project_root: Path, *, env: dict, explicit: bool = False) -> None:
@@ -175,6 +271,7 @@ def build_update_products(project_root: Path, *, desktop: bool) -> None:
     if frontends:
         desktop_built = False
         env: dict = {}
+        managed_node: str | None = None
         workspaces = frontends + (("apps/desktop",) if desktop else ())
         publish_stage("Updating Node dependencies")
 
@@ -183,7 +280,12 @@ def build_update_products(project_root: Path, *, desktop: bool) -> None:
             # A recorded install is trusted as at startup (re-hashing node+npm costs ~2 s per
             # tail); a missing one is still installed explicitly.
             env.update(source_build_env(explicit=True, verify=False))
-            prepare_source_dependencies(project_root, selected, env=env, explicit=True)
+            # The Windows Desktop path must keep preparation on the same PM-owned
+            # node/npm-cli pair as packaging; PATH may contain npm.cmd.
+            nonlocal managed_node
+            if sys.platform == "win32" and desktop:
+                managed_node = product_npm_command(project_root, env=env)[0]
+            prepare_source_dependencies(project_root, selected, env=env, explicit=True, node=managed_node)
 
         # Every product compiles from these node_modules: without them there is nothing to build.
         prepared = attempt("Node dependencies", lambda: node_dependencies(workspaces))
@@ -211,13 +313,13 @@ def build_update_products(project_root: Path, *, desktop: bool) -> None:
                     print("  ✓ TUI is up to date")
                 else:
                     publish_stage("Building the TUI")
-                    attempt("TUI build", lambda: build_source_tui(project_root, env=env))
+                    attempt("TUI build", lambda: build_source_tui(project_root, env=env, node=managed_node))
             if "web" in frontends:
                 if source_product_current(project_root, "web", project_root / "hermes_cli/web_dist"):
                     print("  ✓ Web UI is up to date")
                 else:
                     publish_stage("Building the web UI")
-                    attempt("web UI build", lambda: build_source_web(project_root, env=env))
+                    attempt("web UI build", lambda: build_source_web(project_root, env=env, node=managed_node))
             if desktop and not desktop_skipped:
                 desktop_built = attempt("desktop app build", lambda: _build_desktop_product(project_root, env, publish_stage))
                 desktop_reason = failures[-1][0] if not desktop_built else ""
@@ -297,7 +399,7 @@ def _build_desktop_product(project_root: Path, env: dict, publish_stage) -> None
         try:
             build_prepared_desktop(
                 desktop_dir, source_mode=False,
-                npm=shutil.which("npm", path=env["PATH"]), env=env, icons=project_root,
+                npm=product_npm_command(project_root, env=env), env=env, icons=project_root,
             )
         finally:
             build_lock.release()

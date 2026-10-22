@@ -67,6 +67,8 @@ export type ChatMessage = {
   durationS?: number
   /** Composer attachment ref strings (`@file:...`, `@image:...`) sent with this user message. */
   attachmentRefs?: string[]
+  /** Durable backend type that controls a hydrated row's presentation. */
+  displayKind?: SessionMessage['display_kind']
   /** Durable backend `messages.id`. Absent until the row is persisted. */
   rowId?: number
   /** Backend transcript rows this message represents — the hydration fold

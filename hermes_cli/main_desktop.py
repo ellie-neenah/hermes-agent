@@ -1467,7 +1467,7 @@ def _diagnose_esbuild_ignore_scripts(output: Optional[str]) -> None:
     print("    or stage the binary directly: `node node_modules/esbuild/install.js` in apps/desktop.")
 
 
-def build_prepared_desktop(desktop_dir: Path, *, source_mode: bool, npm: str, env: dict,
+def build_prepared_desktop(desktop_dir: Path, *, source_mode: bool, npm: list[str], env: dict,
                            icons: Path | None = None) -> Optional[Path]:
     """Build prepared desktop sources, then publish the verified staged app."""
     from hermes_cli.source_build import run_in_custody  # npm writes the checkout: update custody
@@ -1494,7 +1494,7 @@ def build_prepared_desktop(desktop_dir: Path, *, source_mode: bool, npm: str, en
         print("  → No Developer ID configured; ad-hoc signing this local rebuild "
               "(CSC_IDENTITY_AUTO_DISCOVERY=false)")
     build_args = ["--icons", str(icons)] if icons else []
-    build_cmd = [npm, "run", "build", "--", *build_args]
+    build_cmd = [*npm, "run", "build", "--", *build_args]
     staging_dir = None if source_mode else _desktop_staging_dir(desktop_dir)
     if staging_dir is not None:
         # electron-builder packs in place; only the verified staging tree may
@@ -1509,7 +1509,7 @@ def build_prepared_desktop(desktop_dir: Path, *, source_mode: bool, npm: str, en
             from hermes_cli.update_stage import publish_stage
 
             publish_stage("Packaging the desktop app")
-            run_in_custody(desktop_dir.parents[1], [npm, "run", "builder", "--", "--dir", "--publish", "never",
+            run_in_custody(desktop_dir.parents[1], [*npm, "run", "builder", "--", "--dir", "--publish", "never",
                            f"-c.directories.output={staging_dir}"], "Packaging the desktop app",
                            cwd=desktop_dir, env=build_env)
         packaged_executable = (
@@ -1697,7 +1697,7 @@ def _run_desktop_one_shot(args: argparse.Namespace, desktop_dir: Path, *, bundle
 def cmd_gui(args: argparse.Namespace):
     """Build and launch the native Electron desktop GUI."""
     from hermes_cli.main import PROJECT_ROOT
-    from hermes_cli.source_build import prepare_source_dependencies, source_build_env
+    from hermes_cli.source_build import prepare_source_dependencies, product_npm_command, source_build_env
     desktop_dir = PROJECT_ROOT / "apps" / "desktop"
     # A bundled install IS the app: no source tree, no build, and the
     # launcher is a sibling of this payload rather than something we
@@ -1769,7 +1769,7 @@ def cmd_gui(args: argparse.Namespace):
     try:
         if needs_build:
             build_env = source_build_env(env, explicit=force_build or getattr(args, "build_only", False))
-            npm = shutil.which("npm", path=build_env["PATH"])
+            npm = product_npm_command(PROJECT_ROOT, env=build_env)
             env["PATH"] = build_env["PATH"]
         if skip_build:
             _check_desktop_skip_build(
@@ -1777,7 +1777,7 @@ def cmd_gui(args: argparse.Namespace):
             )
         elif needs_build:
             prepare_source_dependencies(PROJECT_ROOT, ("ui-tui", "web", "apps/desktop"), env=build_env,
-                                        explicit=force_build or getattr(args, "build_only", False))
+                                        explicit=force_build or getattr(args, "build_only", False), node=npm[0])
             built = build_prepared_desktop(desktop_dir, source_mode=source_mode, npm=npm, env=build_env)
             if not source_mode:
                 # None only when the build was skipped under its own Desktop: reopen the app it kept.
@@ -1985,5 +1985,4 @@ def _launch_bundled_desktop(
     pid = launch_detached(launch_command, env=env, cwd=layout.app_root)
     print(f"→ Launched Hermes Desktop: {' '.join(launch_command)} (pid {pid})")
     sys.exit(0)
-
 

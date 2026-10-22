@@ -2298,6 +2298,26 @@ def _update_preflight_handled(args) -> bool:
         )
 
         print_update_plan(collect_runtime_inventory())
+        from hermes_cli.source_build import (
+            is_windows_source_desktop_update,
+            product_npm_preflight,
+        )
+
+        if is_windows_source_desktop_update(PROJECT_ROOT):
+            toolchain = product_npm_preflight(PROJECT_ROOT)
+            print("→ Windows Desktop packaging preflight:")
+            print(f"  managed Node: {toolchain.node or 'unavailable'}")
+            print(f"  npm-cli entrypoint: {toolchain.npm_cli or 'unavailable'}")
+            print(f"  direct resolver: {toolchain.resolver or 'unavailable'}")
+            if toolchain.ready:
+                version = f" (npm {toolchain.detail})" if toolchain.detail else ""
+                print(f"  ✓ Direct Node → resolver → npm-cli is ready{version}.")
+            elif toolchain.group_policy_denied:
+                print("  ✗ NO-GO: Windows Group Policy denied the selected Node → resolver → npm-cli vector.")
+                print("    No update work was started. Contact IT to allow this managed packaging toolchain.")
+            else:
+                print(f"  ✗ NO-GO: the selected direct packaging vector is unavailable ({toolchain.detail}).")
+                print("    No update work was started. Repair the managed Node/npm toolchain or contact IT.")
         return True
 
     if getattr(args, "list_venv_holders", False):

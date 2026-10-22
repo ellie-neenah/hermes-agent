@@ -77,6 +77,183 @@ def test_automatic_build_preserves_pm_admission_intent(monkeypatch):
     assert intent == [False]
 
 
+def test_product_npm_preflight_replaces_cross_case_inherited_npm_execpath(tmp_path, monkeypatch):
+    """Preflight must not carry a Windows-case variant of a foreign npm CLI."""
+    from hermes_cli import source_build
+
+    root = tmp_path / "source"
+    resolver = root / "scripts" / "build" / "node-deps.mjs"
+    node = tmp_path / "managed" / "node.exe"
+    npm_cli = node.parent / "node_modules" / "npm" / "bin" / "npm-cli.js"
+    resolver.parent.mkdir(parents=True)
+    npm_cli.parent.mkdir(parents=True)
+    resolver.write_text("// resolver", encoding="utf-8")
+    node.write_bytes(b"managed node")
+    npm_cli.write_text("// paired npm CLI", encoding="utf-8")
+    monkeypatch.setattr(pm, "installed_package", lambda name, **_kwargs: (
+        SimpleNamespace(binary=node) if name == "node" else None))
+    monkeypatch.setenv("NPM_EXECPATH", str(tmp_path / "foreign" / "npm-cli.js"))
+    captured = {}
+    monkeypatch.setattr(source_build.subprocess, "run", lambda command, **kwargs: (
+        captured.update(command=command, env=kwargs["env"]), SimpleNamespace(returncode=0, stdout="10.0.0", stderr=""))[1])
+
+    result = source_build.product_npm_preflight(root)
+
+    assert result.ready
+    assert captured["command"] == [str(node), str(resolver), "--npm", "--version"]
+    npm_execpaths = {key: value for key, value in captured["env"].items() if key.casefold() == "npm_execpath"}
+    assert npm_execpaths == {"npm_execpath": str(npm_cli)}
+
+
+@pytest.mark.platforms("windows")
+def test_desktop_build_uses_pm_node_resolver_instead_of_npm_cmd(tmp_path, monkeypatch):
+    """Windows source updates must not hand npm.cmd to either Desktop product command."""
+    from hermes_cli import main_desktop, source_build
+
+    root = tmp_path / "source"
+    desktop = root / "apps" / "desktop"
+    resolver = root / "scripts" / "build" / "node-deps.mjs"
+    node = tmp_path / "managed" / "node.exe"
+    npm_cli = node.parent / "node_modules" / "npm" / "bin" / "npm-cli.js"
+    resolver.parent.mkdir(parents=True)
+    desktop.mkdir(parents=True)
+    node.parent.mkdir(parents=True)
+    npm_cli.parent.mkdir(parents=True)
+    resolver.write_text("// resolver", encoding="utf-8")
+    node.write_bytes(b"managed node")
+    npm_cli.write_text("// paired npm CLI", encoding="utf-8")
+
+    # PATH exposes only the forbidden wrapper. The PM record is the sole allowed Node source.
+    denied_npm = tmp_path / "system" / "npm.CMD"
+    denied_npm.parent.mkdir()
+    denied_npm.write_text("@echo denied", encoding="utf-8")
+    monkeypatch.setattr(pm, "installed_package", lambda name, **_kwargs: (
+        SimpleNamespace(binary=node) if name == "node" else None))
+    monkeypatch.setattr(pm, "ensure", lambda _name, *, base_env, **_kwargs: SimpleNamespace(env=base_env))
+    staging = desktop / ".staging-policy"
+    monkeypatch.setattr(main_desktop, "_desktop_ancestor_in", lambda _desktop: None)
+    monkeypatch.setattr(main_desktop, "_desktop_staging_dir", lambda _desktop: staging)
+    monkeypatch.setattr(main_desktop, "_stop_desktop_processes_locking_build", lambda _desktop: [])
+    monkeypatch.setattr(main_desktop, "_promote_staged_desktop_app", lambda *_args: desktop / "Hermes.exe")
+
+    calls = []
+    monkeypatch.setattr(source_build, "run_in_custody", lambda _root, command, _label, **_kwargs: calls.append(command))
+    env = {"PATH": str(denied_npm.parent)}
+    command = source_build.product_npm_command(root, env=env)
+    main_desktop.build_prepared_desktop(
+        desktop, source_mode=False, npm=command, env=env, icons=root,
+    )
+
+    assert calls == [
+        [str(node), str(resolver), "--npm", "run", "build", "--", "--icons", str(root)],
+        [str(node), str(resolver), "--npm", "run", "builder", "--", "--dir", "--publish", "never",
+         f"-c.directories.output={staging}"],
+    ]
+    assert env["npm_execpath"] == str(npm_cli)
+    assert all(str(denied_npm).lower() not in map(str.lower, call) for call in calls)
+
+
+@pytest.mark.platforms("windows")
+def test_windows_source_desktop_update_keeps_preparation_and_packaging_on_pm_vector(tmp_path, monkeypatch):
+    """A source update never reaches PATH node/npm.cmd before Desktop packaging."""
+    from hermes_cli import (
+        left_core_migration,
+        main_desktop,
+        main_install_repair as install_repair,
+        memory_provider_migration,
+        source_build,
+        update_stage,
+    )
+
+    root = tmp_path / "source"
+    desktop = root / "apps" / "desktop"
+    resolver = root / "scripts" / "build" / "node-deps.mjs"
+    node = tmp_path / "managed" / "node.exe"
+    npm_cli = node.parent / "node_modules" / "npm" / "bin" / "npm-cli.js"
+    foreign_npm = tmp_path / "foreign" / "npm-cli.js"
+    blocked_npm = tmp_path / "blocked" / "npm.CMD"
+    for workspace in ("ui-tui", "web", "apps/desktop"):
+        (root / workspace).mkdir(parents=True, exist_ok=True)
+        (root / workspace / "package.json").write_text("{}", encoding="utf-8")
+    resolver.parent.mkdir(parents=True)
+    node.parent.mkdir(parents=True)
+    npm_cli.parent.mkdir(parents=True)
+    foreign_npm.parent.mkdir(parents=True)
+    blocked_npm.parent.mkdir(parents=True)
+    resolver.write_text("// resolver", encoding="utf-8")
+    node.write_bytes(b"managed node")
+    npm_cli.write_text("// paired npm CLI", encoding="utf-8")
+    foreign_npm.write_text("// foreign npm CLI", encoding="utf-8")
+    blocked_npm.write_text("@echo blocked", encoding="utf-8")
+
+    monkeypatch.setattr(source_build.sys, "platform", "win32")
+    monkeypatch.setattr(pm, "installed_package", lambda name, **_kwargs: (
+        SimpleNamespace(binary=node) if name == "node" else None))
+    pm_preparation_envs = []
+    def ensure(_name, *, base_env, **_kwargs):
+        pm_preparation_envs.append(dict(base_env))
+        return SimpleNamespace(env=base_env)
+    monkeypatch.setattr(pm, "ensure", ensure)
+    monkeypatch.setenv("PATH", str(blocked_npm.parent))
+    monkeypatch.setenv("npm_execpath", str(foreign_npm))
+    monkeypatch.setattr(source_build, "source_product_current", lambda *_args: True)
+    monkeypatch.setattr(install_repair, "_install_configured_features_missing_deps", lambda *_args: None)
+    monkeypatch.setattr(memory_provider_migration, "migrate_all_homes", lambda: None)
+    monkeypatch.setattr(left_core_migration, "migrate_all_homes", lambda: None)
+    monkeypatch.setattr(update_stage, "publish_stage", lambda *_args: None)
+    staging = desktop / ".staging-policy"
+    monkeypatch.setattr(main_desktop, "_desktop_ancestor_in", lambda _desktop: None)
+    monkeypatch.setattr(main_desktop, "_desktop_staging_dir", lambda _desktop: staging)
+    monkeypatch.setattr(main_desktop, "_stop_desktop_processes_locking_build", lambda _desktop: [])
+    monkeypatch.setattr(main_desktop, "_promote_staged_desktop_app", lambda *_args: desktop / "Hermes.exe")
+
+    calls = []
+    monkeypatch.setattr(source_build, "run_in_custody",
+                        lambda _root, command, _label, **kwargs: calls.append((command, kwargs)))
+
+    source_build.build_update_products(root, desktop=True)
+
+    commands = [command for command, _kwargs in calls]
+    assert commands == [
+        [str(node), str(resolver), "--source", str(root), "--reuse",
+         "--workspace", "ui-tui", "--workspace", "web", "--workspace", "apps/desktop"],
+        [str(node), str(resolver), "--npm", "run", "build", "--", "--icons", str(root)],
+        [str(node), str(resolver), "--npm", "run", "builder", "--", "--dir", "--publish", "never",
+         f"-c.directories.output={staging}"],
+    ]
+    assert all(kwargs["env"]["npm_execpath"] == str(npm_cli) for _command, kwargs in calls)
+    assert all(command[0] == str(node) for command in commands)
+    assert all(str(blocked_npm).lower() not in " ".join(command).lower() for command in commands)
+    assert not any(key.lower() == "npm_execpath" for key in pm_preparation_envs[0])
+
+
+@pytest.mark.platforms("windows")
+def test_source_update_rebuilds_the_live_checkout_not_a_broken_sibling(tmp_path, monkeypatch):
+    """The post-update product path owns only its live checkout's staged release."""
+    from hermes_cli import main_desktop, source_build
+
+    live = tmp_path / "hermes-agent"
+    stale = tmp_path / "hermes-agent.broken-20260805"
+    live_desktop = live / "apps" / "desktop"
+    stale_executable = stale / "apps" / "desktop" / "release" / "win-unpacked" / "Hermes.exe"
+    live_desktop.mkdir(parents=True)
+    stale_executable.parent.mkdir(parents=True)
+    stale_executable.write_bytes(b"stale")
+    seen = {}
+
+    monkeypatch.setattr(main_desktop, "_packaged_desktop_current_for_head", lambda *_args: False)
+    monkeypatch.setattr(source_build, "product_npm_command", lambda root, *, env: (
+        seen.setdefault("npm_root", root), ["managed-node", "node-deps.mjs", "--npm"])[1])
+    monkeypatch.setattr(main_desktop, "build_prepared_desktop", lambda desktop, **_kwargs: (
+        seen.setdefault("desktop", desktop), live_desktop / "release" / "win-unpacked" / "Hermes.exe")[1])
+    monkeypatch.setattr(main_desktop, "_refresh_installed_desktop_apps", lambda desktop: seen.setdefault("refresh", desktop))
+
+    source_build._build_desktop_product(live, {}, lambda _stage: None)
+
+    assert seen == {"npm_root": live, "desktop": live_desktop, "refresh": live_desktop}
+    assert stale_executable.is_file()
+
+
 def test_installed_npm_does_not_authorize_missing_workspace_dependencies(source_checkout, monkeypatch):
     from hermes_cli.source_build import prepare_source_dependencies, source_build_env
 

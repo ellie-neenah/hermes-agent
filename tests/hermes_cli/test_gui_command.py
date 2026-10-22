@@ -132,10 +132,15 @@ def _packaged_exe_rel() -> Path:
 
 
 def _npm_argv(cmd) -> list:
-    """The npm command line inside a build call. A direct ``hermes desktop`` build holds the
-    checkout lock (review C5), so on POSIX it runs under the custody launcher
-    (``python -I -S -c <reaper> <fds> npm ...``)."""
+    """Return npm-like argv from the custody wrapper or managed Node resolver.
+
+    Product builds invoke the resolver as ``node node-deps.mjs --npm …``;
+    neither that vector nor the POSIX custody wrapper may be mistaken for a
+    PATH/npm.cmd invocation.
+    """
     cmd = list(cmd)
+    if "--npm" in cmd:
+        return ["npm", *cmd[cmd.index("--npm") + 1:]]
     return cmd[6:] if cmd[1:4] == ["-I", "-S", "-c"] else cmd
 
 
@@ -310,23 +315,21 @@ def test_gui_close_preview_flag_forwards_to_packaged_exe(tmp_path, monkeypatch):
     preview pane the user cannot otherwise escape (#97213)."""
     root = _make_desktop_tree(tmp_path)
     monkeypatch.setattr(cli_main, "PROJECT_ROOT", root)
-    # Patching hermes_cli.main_desktop.subprocess.run swaps the shared stdlib
-    # module's attribute, so the desktop-entry install's interpreter probe
-    # (`<python> -I -c 'import hermes_cli.main'`) would be captured as a
-    # launch too. Neutralize the entry install the way the other foreground
-    # tests do; this test is only about the flag reaching the packaged exe.
+    # Capture both foreground launches and the Windows detached Popen path.
+    # The test is only about the forwarded argument, not process lifetime.
     monkeypatch.setattr(main_desktop, "_register_linux_desktop_entry", lambda **kw: None)
     packaged_exe = _make_packaged_executable(root, monkeypatch)
 
     launched: list[list[str]] = []
 
-    def fake_run(cmd, **kw):
+    def fake_launch(cmd, **kw):
         launched.append(list(cmd))
         return subprocess.CompletedProcess(cmd, 0)
 
     with patch("hermes_cli.main_desktop._desktop_build_needed", return_value=False), \
          patch("hermes_cli.main_desktop._desktop_linux_sandbox_fixup", return_value=True), \
-         patch("hermes_cli.main_desktop.subprocess.run", side_effect=fake_run), \
+         patch("hermes_cli.main_desktop.subprocess.run", side_effect=fake_launch), \
+         patch("hermes_cli.main_desktop.subprocess.Popen", side_effect=fake_launch), \
          pytest.raises(SystemExit) as exc:
         cli_main.cmd_gui(_ns(close_preview=True))
 
@@ -1545,7 +1548,12 @@ def test_gui_foreground_launch_ctrl_c_exits_cleanly(tmp_path, monkeypatch, capsy
 
 def _gui_build_patches(root: Path, run_side_effect):
     return [
-        patch("hermes_cli.main.shutil.which", return_value="/usr/bin/npm"),
+        # GUI builds execute npm only through the PM-owned Node plus resolver;
+        # never substitute a PATH/npm.cmd wrapper in this test harness.
+        patch("hermes_cli.source_build.product_npm_command",
+              return_value=["managed-node", "node-deps.mjs", "--npm"]),
+        # Windows pack preparation separately resolves PM-managed Git.
+        patch("pm.ensure", side_effect=lambda _name, *, base_env, **_kw: types.SimpleNamespace(env=base_env)),
         # Staging doubles are text; the PE-validation suite owns real binaries.
         patch("hermes_cli.main_desktop._desktop_exe_integrity_error", return_value=None),
         patch("hermes_cli.source_build.prepare_source_dependencies",
@@ -1670,6 +1678,9 @@ def test_stop_desktop_processes_locking_build_posix_swap_bypasses_early_return(t
             return [], []
 
     monkeypatch.setitem(sys.modules, "psutil", _FakePsutil)
+    # This verifies the POSIX-only override irrespective of the host running
+    # the suite; Windows normally scans even without also_posix.
+    monkeypatch.setattr(main_desktop.sys, "platform", "linux")
 
     assert main_desktop._stop_desktop_processes_locking_build(desktop_dir) == []
     assert main_desktop._stop_desktop_processes_locking_build(desktop_dir, also_posix=True) == [100]
@@ -1763,7 +1774,7 @@ def test_windows_build_under_its_own_desktop_skips_instead_of_killing_it(tmp_pat
                         lambda *a, **k: pytest.fail("must not stop the Desktop running this build"))
     monkeypatch.setattr("pm.progress.run_contained", lambda *a, **k: pytest.fail("must not pack"))
 
-    assert main_desktop.build_prepared_desktop(desktop_dir, source_mode=False, npm="npm", env={}) is None
+    assert main_desktop.build_prepared_desktop(desktop_dir, source_mode=False, npm=["npm"], env={}) is None
     assert "pid 41" in capsys.readouterr().out
     assert not list(desktop_dir.glob(f"{main_desktop._DESKTOP_STAGING_PREFIX}*"))
 
@@ -1779,7 +1790,7 @@ def test_gui_failed_pack_leaves_previous_app_untouched(tmp_path, monkeypatch, ca
     monkeypatch.setenv("ELECTRON_MIRROR", "https://example.test/electron/")
 
     def failing_pack(cmd, **kwargs):
-        if cmd[1:3] != ["run", "builder"]:
+        if _npm_argv(cmd)[1:3] != ["run", "builder"]:
             return subprocess.CompletedProcess(cmd, 0)
         # Mimic before-pack.mjs wiping appOutDir inside the OUTPUT dir it was
         # given, then dying (corrupt Electron zip → ENOENT on rename).

@@ -1,10 +1,12 @@
 """Desktop launch prepares once, then stages and publishes the local pack."""
 from argparse import Namespace
 import subprocess
+from types import SimpleNamespace
 
 import pytest
 
 from hermes_cli import main, main_desktop
+import pm
 from tests.hermes_cli.test_source_build import source_checkout, source_products, _events
 
 
@@ -64,3 +66,41 @@ def test_skip_build_source_checks_artifacts_without_provisioning(desktop_source)
     (electron / "package.json").write_text('{}')
     main_desktop.cmd_gui(Namespace(source=True, skip_build=True, build_only=True))
     assert acquired == []
+
+
+@pytest.mark.platforms("windows")
+def test_manual_gui_preparation_uses_the_pm_node_not_ambient_path(tmp_path, monkeypatch):
+    """Manual Desktop preparation must use the product vector, never PATH node."""
+    from hermes_cli import source_build
+
+    root = tmp_path / "source"
+    desktop = root / "apps" / "desktop"
+    resolver = root / "scripts" / "build" / "node-deps.mjs"
+    node = tmp_path / "managed" / "node.exe"
+    npm_cli = node.parent / "node_modules" / "npm" / "bin" / "npm-cli.js"
+    for workspace in ("ui-tui", "web", "apps/desktop"):
+        (root / workspace).mkdir(parents=True, exist_ok=True)
+        (root / workspace / "package.json").write_text("{}", encoding="utf-8")
+    resolver.parent.mkdir(parents=True)
+    npm_cli.parent.mkdir(parents=True)
+    resolver.write_text("// resolver", encoding="utf-8")
+    node.write_bytes(b"managed node")
+    npm_cli.write_text("// paired npm CLI", encoding="utf-8")
+
+    monkeypatch.setattr(main, "PROJECT_ROOT", root)
+    monkeypatch.setattr(pm, "installed_package", lambda name, **_kwargs: (
+        SimpleNamespace(binary=node) if name == "node" else None))
+    monkeypatch.setattr(pm, "ensure", lambda _name, *, base_env, **_kwargs: SimpleNamespace(env=base_env))
+    monkeypatch.setattr(main_desktop, "_desktop_launch_env", lambda _args: ({"PATH": str(tmp_path / "ambient")}, []))
+    monkeypatch.setattr(main_desktop, "_desktop_build_needed", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(main_desktop, "_register_linux_desktop_entry", lambda **_kwargs: None)
+    monkeypatch.setattr(main_desktop, "build_prepared_desktop", lambda *_args, **_kwargs: desktop / "release/Hermes.exe")
+    monkeypatch.setattr(source_build.shutil, "which", lambda program, **_kwargs: pytest.fail(
+        f"manual GUI preparation reached ambient {program}"))
+    calls = []
+    monkeypatch.setattr(source_build, "run_in_custody", lambda _root, command, _label, **_kwargs: calls.append(command))
+
+    main_desktop.cmd_gui(Namespace(build_only=True))
+
+    assert calls == [[str(node), str(resolver), "--source", str(root), "--reuse",
+                      "--workspace", "ui-tui", "--workspace", "web", "--workspace", "apps/desktop"]]

@@ -619,7 +619,7 @@ def test_the_desktop_build_runs_in_checkout_custody(repo, tmp_path, monkeypatch)
     lock = ul.UpdateLock(path=tmp_path / "marker", install_root=repo)
     assert lock.acquire()
     try:
-        main_desktop.build_prepared_desktop(desktop, source_mode=True, npm=str(npm), env=dict(os.environ))
+        main_desktop.build_prepared_desktop(desktop, source_mode=True, npm=[str(npm)], env=dict(os.environ))
     finally:
         lock.release()
     assert out.read_text(encoding="utf-8-sig").split() == ["yes"], "the desktop build ran without the checkout lock"
