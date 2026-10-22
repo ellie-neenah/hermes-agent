@@ -12,8 +12,14 @@ import { prepareElectronRuntime } from './electron-runtime.mjs'
 
 // npm.cmd needs a shell. Use npm's JS entrypoint so paths remain argv on Windows.
 export function npmCommand({ env = process.env } = {}) {
+  // Product-owned Python callers pin this verified JavaScript entrypoint. Return
+  // before consulting PATH so their Windows plan/build vector never even probes
+  // npm.cmd (or any other shell wrapper).
+  if (env.npm_execpath?.endsWith('.js') && existsSync(env.npm_execpath)) {
+    return [process.execPath, env.npm_execpath]
+  }
   const names = process.platform === 'win32' ? ['npm.cmd', 'npm'] : ['npm']
-  const candidates = [env.npm_execpath]
+  const candidates = []
   for (const dir of (env.PATH || env.Path || '').split(delimiter)) {
     for (const name of names) {
       const bin = join(dir, name)

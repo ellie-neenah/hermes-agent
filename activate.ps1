@@ -112,6 +112,13 @@ function global:hermes {
     Push-Location -LiteralPath $global:_hermesWorktree
     try {
         $py = $env:PYTHON
+        if ($env:__HERMES_MANAGED_ENVIRONMENT -eq '1') {
+            if (-not $py -or -not (Test-Path -LiteralPath $py)) {
+                Write-Error 'hermes: managed environment is missing or corrupt; run `hermes pm repair`' -ErrorAction Continue
+                $global:LASTEXITCODE = 1
+                return
+            }
+        }
         if (-not $py) {
             foreach ($candidate in @(
                 '.venv\Scripts\python.exe', 'venv\Scripts\python.exe',
