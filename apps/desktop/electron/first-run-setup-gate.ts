@@ -4,6 +4,8 @@ interface FirstRunSetupBackend {
   platform?: string
   /** What the local setup card represents: 'none' = installer offer, the rest = use existing. */
   local?: 'none' | 'installed' | 'bundled'
+  /** A final bounded source-launcher probe timeout is an existing-install recovery state. */
+  verification?: 'verified' | 'timed-out'
 }
 
 interface FirstRunSetupGateOptions {

@@ -234,3 +234,111 @@ test('Windows console selection uses only the selected interpreter directory', (
     fs.rmSync(temp, { recursive: true, force: true })
   }
 })
+
+function sourceInstall(root: string): string {
+  const launcher: string = path.join(root, '.hermes', 'bin', 'hermes')
+
+  fs.mkdirSync(path.join(root, 'hermes_cli'), { recursive: true })
+  fs.mkdirSync(path.dirname(launcher), { recursive: true })
+  fs.writeFileSync(path.join(root, 'hermes_cli', 'main.py'), '')
+  fs.writeFileSync(launcher, '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+
+  return launcher
+}
+
+test('a source launcher final bounded timeout remains an installed backend instead of becoming bootstrap-needed', async (): Promise<void> => {
+  const root: string = fs.mkdtempSync(path.join(os.tmpdir(), 'source-probe-timeout-'))
+  const probe = vi.fn(async () => {
+    throw Object.assign(new Error('probe timed out'), { signal: 'SIGTERM', killed: true })
+  })
+
+  try {
+    sourceInstall(root)
+    const backend = await resolveSourceInstallationBackend(root, ['serve'], { isWindows: false, probe })
+
+    assert.equal(probe.mock.calls.length, 1)
+    assert.ok(backend, 'a final bounded timeout is an existing-install recovery state')
+    assert.equal(backend.bootstrap, false)
+    assert.equal(backend.verification, 'timed-out')
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a source launcher accepts a successful probe', async (): Promise<void> => {
+  const root: string = fs.mkdtempSync(path.join(os.tmpdir(), 'source-probe-success-'))
+  const probe = vi.fn(async () => {})
+
+  try {
+    sourceInstall(root)
+    const backend = await resolveSourceInstallationBackend(root, ['serve'], { isWindows: false, probe })
+
+    assert.equal(probe.mock.calls.length, 1)
+    assert.ok(backend)
+    assert.equal(backend.verification, 'verified')
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a final source-launcher timeout logs its existing-install recovery', () => {
+  const logs: string[] = []
+
+  resolveSourceInstallationBackend.logRuntimeUse(
+    { label: 'timed out source', verification: 'timed-out' },
+    message => logs.push(message)
+  )
+  resolveSourceInstallationBackend.logRuntimeUse({ label: 'verified source', verification: 'verified' }, message => logs.push(message))
+
+  assert.deepEqual(logs, [
+    '[backend] source launcher verification timed out after its bounded retry; starting the existing install',
+    '[backend] using timed out source',
+    '[backend] using verified source'
+  ])
+})
+
+test('missing or non-zero source launchers remain genuine setup candidates', async (): Promise<void> => {
+  const root: string = fs.mkdtempSync(path.join(os.tmpdir(), 'source-probe-invalid-'))
+  const nonZeroProbe = vi.fn(async () => {
+    throw Object.assign(new Error('probe exited 1'), { code: 1 })
+  })
+
+  try {
+    const launcher = sourceInstall(root)
+
+    assert.equal(
+      await resolveSourceInstallationBackend(root, ['serve'], { isWindows: false, probe: nonZeroProbe }),
+      null
+    )
+    assert.equal(nonZeroProbe.mock.calls.length, 1)
+
+    for (const error of [
+      Object.assign(new Error('probe command missing'), { code: 'ENOENT' }),
+      Object.assign(new Error('probe access denied'), { code: 'EACCES' }),
+      Object.assign(new Error('unverified timeout error'), { code: 'ETIMEDOUT' }),
+      Object.assign(new Error('probe was externally terminated'), { signal: 'SIGTERM', killed: false }),
+      new Error('probe spawn failed')
+    ]) {
+      const failedExecProbe = vi.fn(async () => {
+        throw error
+      })
+
+      assert.equal(
+        await resolveSourceInstallationBackend(root, ['serve'], { isWindows: false, probe: failedExecProbe }),
+        null,
+        'spawn and execution failures must fall through to setup instead of launching an unusable source install'
+      )
+      assert.equal(failedExecProbe.mock.calls.length, 1)
+    }
+
+    fs.rmSync(launcher)
+    const missingProbe = vi.fn(async () => {})
+    assert.equal(
+      await resolveSourceInstallationBackend(root, ['serve'], { isWindows: false, probe: missingProbe }),
+      null
+    )
+    assert.equal(missingProbe.mock.calls.length, 0)
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})

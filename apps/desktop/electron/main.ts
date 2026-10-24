@@ -5058,7 +5058,7 @@ async function ensureRuntime(
   assertStillOwned()
 
   if (!backend.bootstrap) {
-    rememberLog(`[backend] using ${backend.label}`)
+    resolveSourceInstallationBackend.logRuntimeUse(backend, rememberLog)
     await advanceBootProgress('runtime.external', `Using ${backend.label}`, 32)
 
     return backend
