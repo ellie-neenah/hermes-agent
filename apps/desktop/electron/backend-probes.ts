@@ -36,22 +36,11 @@ function isTimeoutError(err: unknown): boolean {
     return false
   }
 
-  const e = err as { code?: string; killed?: boolean; signal?: string }
+  const e = err as { killed?: boolean; signal?: string }
 
-  if (e.killed === true) {
-    return true
-  }
-
-  if (e.code === 'ETIMEDOUT') {
-    return true
-  }
-
-  // Node marks timed-out execFileSync with SIGTERM on some platforms.
-  if (e.signal === 'SIGTERM') {
-    return true
-  }
-
-  return false
+  // execProbe itself creates the recoverable timeout by terminating its child.
+  // A bare ETIMEDOUT can come from an unrelated spawn or transport failure.
+  return e.signal === 'SIGTERM' && e.killed === true
 }
 
 /**

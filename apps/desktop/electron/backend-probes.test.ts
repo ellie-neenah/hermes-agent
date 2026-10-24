@@ -17,6 +17,7 @@ import {
   canImportHermesCli,
   DEFAULT_PROBE_TIMEOUT_MS,
   execProbe,
+  isTimeoutError,
   PROBE_TIMEOUT_MS,
   resolveProbeTimeoutMs,
   shouldTrustHermesOverride,
@@ -75,6 +76,38 @@ test('execProbe keeps the parent event loop available to the child', async () =>
   }
 
   assert.ifError(unexpectedSocketError)
+})
+
+test('SIGTERM without a killed child is not a bounded probe timeout', () => {
+  assert.equal(isTimeoutError({ signal: 'SIGTERM', killed: false }), false)
+})
+
+test('bare ETIMEDOUT without child-termination evidence is not a bounded probe timeout', () => {
+  assert.equal(isTimeoutError({ code: 'ETIMEDOUT' }), false)
+})
+
+test('execProbe retries one timeout and accepts a later successful attempt', async (): Promise<void> => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-probe-retry-'))
+  const attempts = path.join(temp, 'attempts')
+  const script = `
+    const fs = require('node:fs')
+    const attempts = process.argv[1]
+    const count = fs.existsSync(attempts) ? Number(fs.readFileSync(attempts, 'utf8')) + 1 : 1
+    fs.writeFileSync(attempts, String(count))
+    if (count === 1) setInterval(() => {}, 1_000)
+  `
+
+  try {
+    await execProbe(NODE_BIN, ['-e', script, attempts], {
+      stdio: 'ignore',
+      timeout: 1_000,
+      windowsHide: true
+    })
+
+    assert.equal(fs.readFileSync(attempts, 'utf8'), '2')
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true })
+  }
 })
 
 test('canImportHermesCli returns false when path is falsy', async () => {

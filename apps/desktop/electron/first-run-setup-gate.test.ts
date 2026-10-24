@@ -30,6 +30,16 @@ test('first-run setup gate skips non-bootstrap backends', async () => {
   assert.equal(gate.hasWaiter(), false)
 })
 
+test('first-run setup gate never bootstraps an existing source launcher after a final bounded timeout', async () => {
+  const prompts = []
+  const gate = createFirstRunSetupGate({ promptChoice: backend => prompts.push(backend), stuckAfterMs: 0 })
+
+  await gate.wait({ kind: 'command', local: 'installed', verification: 'timed-out' })
+
+  assert.deepEqual(prompts, [])
+  assert.equal(gate.hasWaiter(), false)
+})
+
 test('first-run setup gate prompts once for concurrent waits', async () => {
   const prompts = []
   const gate = createFirstRunSetupGate({ promptChoice: backend => prompts.push(backend), stuckAfterMs: 0 })
