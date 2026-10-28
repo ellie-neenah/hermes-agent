@@ -72,6 +72,11 @@ _hermes_script="$(hermes_compose_env "$_HERMES_REPO" sh)" || {
     return 1 2>/dev/null || exit 1
 }
 _hermes_keys="$(printf '%s\n' "$_hermes_script" | sed -n 's/^export \([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' | tr '\n' ' ')"
+_hermes_managed=0
+case " $_hermes_keys " in
+    *" __HERMES_MANAGED_ENVIRONMENT "*) _hermes_managed=1 ;;
+    *) _hermes_keys="$_hermes_keys PYTHON __HERMES_MANAGED_ENVIRONMENT" ;;
+esac
 
 # --- snapshot what we are about to change (deactivate restores this) ---
 # __HERMES_ACTIVATED is part of the composed env below (it carries the
@@ -83,6 +88,9 @@ for _hermes_k in $_hermes_keys; do
     eval "__HERMES_PRIOR_$_hermes_k=\${$_hermes_k-__HERMES_UNSET__}"
 done
 hermes_apply_env "$_hermes_script"
+if [ "$_hermes_managed" != 1 ]; then
+    unset PYTHON __HERMES_MANAGED_ENVIRONMENT
+fi
 
 # This checkout, not whichever `hermes` PATH finds. A function beats PATH, an
 # alias, and a hashed command, including the MSIX execution alias.
@@ -184,4 +192,4 @@ __HERMES_KEY_LIST="$_hermes_keys"
 # The composition library is not part of the user's shell.
 unset -f hermes_sync hermes_bootstrap_python hermes_compose_env hermes_apply_env \
          hermes_activation_current hermes_ensure_env
-unset _HERMES_REPO _hermes_script _hermes_keys _hermes_k _hermes_top
+unset _HERMES_REPO _hermes_script _hermes_keys _hermes_k _hermes_top _hermes_managed

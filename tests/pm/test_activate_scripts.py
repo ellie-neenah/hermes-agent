@@ -49,6 +49,33 @@ def test_source_activate_exports_the_pm_env(tmp_path: Path):
 
 
 @pytest.mark.platforms("windows")
+def test_unmanaged_bash_activation_clears_inherited_python_overrides(tmp_path: Path):
+    root = isolated_checkout(tmp_path)
+    store, _ = fake_store(tmp_path)
+    env = bash_env(store)
+    env.update(PYTHON="stale-python", __HERMES_MANAGED_ENVIRONMENT="1")
+    script = (
+        f'source "{posix(root / "activate")}" && '
+        'test -z "${PYTHON+x}" && '
+        'test -z "${__HERMES_MANAGED_ENVIRONMENT+x}" && '
+        'deactivate && '
+        'test "$PYTHON" = stale-python && '
+        'test "$__HERMES_MANAGED_ENVIRONMENT" = 1 && '
+        'echo cleared-and-restored'
+    )
+    result = subprocess.run(
+        [bash(), "-c", script],
+        capture_output=True,
+        text=True,
+        cwd=posix(tmp_path),
+        env=env,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "cleared-and-restored"
+
+
+@pytest.mark.platforms("windows")
 def test_activate_exports_the_sentinel_to_child_processes(tmp_path: Path):
     """Repo scripts read activation from the environment, so the sentinel must
     survive into an exec'd child (a plain shell variable would not), and
@@ -179,13 +206,16 @@ def test_powershell_activate_exports_and_deactivates(tmp_path: Path):
         [str(spawnable_python()), "-m", "venv", "--without-pip", str(root / ".venv")],
         check=True, capture_output=True, env=env, timeout=60,
     )
+    env.update(PYTHON="stale-python", __HERMES_MANAGED_ENVIRONMENT="1")
     ps = powershell()
     assert ps, "native Windows test requires PowerShell"
     result = subprocess.run(
         [ps, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
          f"$ErrorActionPreference='Stop'; $env:PYTHONPATH='caller-original'; "
          f". '{root / 'activate.ps1'}'; "
+         "if ($env:PYTHON -or $env:__HERMES_MANAGED_ENVIRONMENT) { throw 'stale override survived activation' }; "
          "Write-Output ('active=' + $env:PYTHONPATH); deactivate; "
+         "if ($env:PYTHON -ne 'stale-python' -or $env:__HERMES_MANAGED_ENVIRONMENT -ne '1') { throw 'prior override was not restored' }; "
          "Write-Output ('after=' + $env:PYTHONPATH)"],
         capture_output=True, text=True, cwd=str(tmp_path), env=env, timeout=40,
         check=False,
