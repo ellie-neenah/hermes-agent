@@ -317,7 +317,9 @@ def source_checkout(tmp_path, monkeypatch):
         "npmrc: process.env.NPM_CONFIG_USERCONFIG}) + '\\n');\n",
         encoding="utf-8",
     )
-    subprocess.run([npm, "install", "--package-lock-only", "--ignore-scripts", "--offline",
+    npm_cli = (Path(npm).parent / "node_modules" / "npm" / "bin" / "npm-cli.js"
+               if os.name == "nt" else Path(npm).resolve())
+    subprocess.run([node, str(npm_cli), "install", "--package-lock-only", "--ignore-scripts", "--offline",
                     "--no-audit", "--no-fund"], cwd=root, check=True)
     scripts = root / "scripts" / "build"
     scripts.mkdir(parents=True)

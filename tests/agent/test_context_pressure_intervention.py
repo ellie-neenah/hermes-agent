@@ -58,6 +58,33 @@ def test_provider_usage_warns_once_at_first_sixty_percent_crossing(tmp_path, mon
     assert "Continue knowingly" in text
 
 
+def test_muted_turn_does_not_consume_context_pressure_warning(tmp_path, monkeypatch):
+    from agent.notification_presentation import notification_turn
+
+    agent = _agent(tmp_path, monkeypatch)
+    warnings = []
+
+    def status_callback(kind, text):
+        if getattr(agent, "_mute_notification_reply", False):
+            return
+        warnings.append((kind, text))
+
+    agent.status_callback = status_callback
+    try:
+        with notification_turn(agent, muted=True, session_id="pressure"):
+            _record(agent, _response(60))
+        assert not getattr(agent, "_context_pressure_intervention_emitted", False)
+        assert warnings == []
+
+        _record(agent, _response(60))
+        _record(agent, _response(80))
+    finally:
+        agent.close()
+
+    assert len(warnings) == 1
+    assert warnings[0][0] == "context_pressure"
+
+
 def test_throwing_status_callback_does_not_fail_turn_or_spend_warning_without_fallback(tmp_path, monkeypatch):
     agent = _agent(tmp_path, monkeypatch)
     delivered = []
