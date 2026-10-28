@@ -587,6 +587,10 @@ def activation_environment(project_root: Path) -> dict[str, str]:
         # ``venv``/``.venv`` or the caller's ambient Python.
         env["PYTHON"] = str(managed.python)
         env["__HERMES_MANAGED_ENVIRONMENT"] = "1"
+    else:
+        # An inherited interpreter override is not scoped to this unmanaged checkout.
+        env.pop("PYTHON", None)
+        env.pop("__HERMES_MANAGED_ENVIRONMENT", None)
     # The child-process sentinel. Its VALUE is the installed-state file this
     # environment was composed against, so a consumer learns that it inherited
     # an activated shell and which checkout/profile that shell came from. Its
