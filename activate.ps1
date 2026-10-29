@@ -60,6 +60,10 @@ try {
 # __HERMES_ACTIVATED (the sentinel repo scripts and the shebang prologue read)
 # is part of the composed env, so it is saved and restored with the rest.
 $global:_hermesKeys = @($composed.PSObject.Properties.Name)
+$hermesManaged = $global:_hermesKeys -contains '__HERMES_MANAGED_ENVIRONMENT'
+if (-not $hermesManaged) {
+    $global:_hermesKeys += @('PYTHON', '__HERMES_MANAGED_ENVIRONMENT')
+}
 $global:_hermesSaved = @{}
 foreach ($key in $global:_hermesKeys) {
     $global:_hermesSaved[$key] = [pscustomobject]@{
@@ -69,6 +73,9 @@ foreach ($key in $global:_hermesKeys) {
 }
 foreach ($property in $composed.PSObject.Properties) {
     Set-Item -Path "env:$($property.Name)" -Value ([string]$property.Value)
+}
+if (-not $hermesManaged) {
+    Remove-Item env:PYTHON, env:__HERMES_MANAGED_ENVIRONMENT -ErrorAction SilentlyContinue
 }
 # This checkout, not whichever `hermes` PATH finds. A function beats PATH,
 # an alias, and the MSIX execution alias. It runs only while the shell is

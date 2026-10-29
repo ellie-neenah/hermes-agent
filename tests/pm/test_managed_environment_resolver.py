@@ -74,3 +74,24 @@ def test_managed_resolver_leaves_unmanaged_checkout_unresolved(tmp_path, monkeyp
     (legacy / "pyvenv.cfg").write_text("version = 3.11.0\n", encoding="utf-8")
 
     assert environments.managed_environment(root) is None
+
+
+def test_unmanaged_activation_discards_inherited_managed_interpreter(tmp_path, monkeypatch):
+    from pm import registry, testenv
+
+    managed_root, generation, _legacy_python = _write_managed_state(tmp_path, monkeypatch)
+    root = tmp_path / "unmanaged-checkout"
+    root.mkdir()
+    stale_python = str(environments.venv_python(generation))
+    monkeypatch.setenv("PYTHON", stale_python)
+    monkeypatch.setenv("__HERMES_MANAGED_ENVIRONMENT", "1")
+    monkeypatch.setenv("__HERMES_ACTIVATED", str(environments.runtime_facts_path(managed_root)))
+    monkeypatch.setattr(registry, "all_packages", lambda: [])
+    monkeypatch.setattr(testenv, "testenv_python", lambda project_root: None)
+
+    env = environments.activation_environment(root)
+
+    assert "PYTHON" not in env
+    assert "__HERMES_MANAGED_ENVIRONMENT" not in env
+    assert env["__HERMES_ACTIVATED"] == str(environments.runtime_facts_path(root))
+    assert env["PYTHONPATH"] == str(root.resolve())

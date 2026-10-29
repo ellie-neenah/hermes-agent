@@ -84,3 +84,19 @@ def test_setup_failure_leaves_the_caller_unchanged(tmp_path):
     """, tmp_path)
     assert run.returncode == 0, run.stdout + run.stderr
     assert "setup failed" in run.stderr
+
+
+def test_unmanaged_activation_clears_inherited_python_overrides(tmp_path):
+    root, env = sync_checkout(tmp_path)
+    env.update(PYTHON="stale-python", __HERMES_MANAGED_ENVIRONMENT="1")
+    run = _fish(root, env, """
+        source "@ACTIVATE@"
+        or exit 10
+        set -q PYTHON; and exit 11
+        set -q __HERMES_MANAGED_ENVIRONMENT; and exit 12
+        deactivate
+        test "$PYTHON" = stale-python; or exit 13
+        test "$__HERMES_MANAGED_ENVIRONMENT" = 1; or exit 14
+        exit 0
+    """, tmp_path)
+    assert run.returncode == 0, run.stdout + run.stderr

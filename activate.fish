@@ -42,6 +42,12 @@ end
 
 # --- snapshot what we are about to change (deactivate restores this) ---
 set -g __hermes_keys (string replace -rf '^set -gx (\S+) .*' '$1' -- $composed)
+set -l hermes_managed 0
+if contains -- __HERMES_MANAGED_ENVIRONMENT $__hermes_keys
+    set hermes_managed 1
+else
+    set -ga __hermes_keys PYTHON __HERMES_MANAGED_ENVIRONMENT
+end
 for name in $__hermes_keys
     if set -q $name
         set -g __hermes_had_$name 1
@@ -49,6 +55,9 @@ for name in $__hermes_keys
     end
 end
 string join \n -- $composed | source
+if test "$hermes_managed" = 0
+    set -eg PYTHON __HERMES_MANAGED_ENVIRONMENT
+end
 
 # This checkout, not whichever `hermes` PATH finds. A function beats PATH.
 set -g __hermes_worktree $repo

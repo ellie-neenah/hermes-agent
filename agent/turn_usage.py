@@ -30,6 +30,10 @@ _CONTEXT_PRESSURE_INTERVENTION_TEXT = (
 
 def _maybe_emit_context_pressure_intervention(agent: Any, prompt_tokens: Any) -> None:
     """Warn once when provider-confirmed occupancy first reaches 60% in a session."""
+    # Muted diagnostic turns suppress their callback without a delivery receipt;
+    # keep the session-wide warning pending for the next visible turn.
+    if getattr(agent, "_mute_notification_reply", False):
+        return
     if getattr(agent, "_context_pressure_intervention_emitted", False):
         return
     compressor = getattr(agent, "context_compressor", None)
