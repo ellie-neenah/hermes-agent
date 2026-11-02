@@ -14,7 +14,7 @@ from hermes_cli import update_completion
 
 
 @pytest.fixture
-def transition(tmp_path):
+def transition(tmp_path, monkeypatch):
     root = tmp_path / "checkout"
     root.mkdir()
     home = tmp_path / "home"
@@ -25,6 +25,30 @@ def transition(tmp_path):
     pm_package = root / "pm"
     pm_package.mkdir()
     (pm_package / "__init__.py").write_text("OLD_API = True\n")
+
+    # Every Python child belongs to this fixture, never the installed Hermes venv.
+    selected = tmp_path / "selected-python"
+    venv.EnvBuilder(with_pip=False).create(selected)
+    selected_python = selected / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    monkeypatch.setattr(sys, "executable", str(selected_python))
+    popen = subprocess.Popen
+
+    def owned_process(command, *args, **kwargs):
+        assert not kwargs.get("shell") and kwargs.get("executable") is None, "process must use the fixture vector"
+        if str(command[0]) == "git":
+            assert not any(str(arg) == "-C" or str(arg).startswith(("--git-dir", "--work-tree"))
+                           for arg in command[1:]), "git must stay in the fixture checkout"
+        executable = Path(str(command[0]))
+        cwd = Path(kwargs.get("cwd") or Path.cwd()).resolve()
+        assert cwd == root.resolve(), f"process escaped fixture checkout: {command!r} ({cwd})"
+        allowed_pythons = (selected_python.absolute(),
+                           (tmp_path / "obsolete-python" /
+                            ("Scripts/python.exe" if os.name == "nt" else "bin/python")).absolute())
+        assert str(command[0]) == "git" or executable.absolute() in allowed_pythons, (
+            f"process executable is not fixture-owned: {command!r}")
+        return popen(command, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", owned_process)
 
     def git(*args):
         return subprocess.run(["git", *args], cwd=root, text=True, capture_output=True, check=True).stdout.strip()
@@ -59,9 +83,6 @@ def transition(tmp_path):
         "    with pathlib.Path('events.jsonl').open('a') as f:\n"
         "        f.write(json.dumps(dict(name=name, pid=os.getpid(), python=sys.executable, **values)) + '\\n')\n"
     )
-    selected = tmp_path / "selected-python"
-    venv.EnvBuilder(with_pip=False).create(selected)
-    selected_python = selected / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     (pm_package / "environments.py").write_text(
         "import os, sys\n"
         "from pathlib import Path\n"
@@ -103,13 +124,15 @@ def transition(tmp_path):
         "write_source_stamp = lambda root: event('stamp')\n"
     )
     # The shared completion tail is part of the NEW tree the child runs from, and so are the
-    # modules its imports reach: update_lock (the tail claims the shared update lock) and
-    # _subprocess_compat (it exposes PM's git for the builds) — neither exists in the OLD
+    # modules its imports reach: update_lock and its PID-liveness probe _early_recovery,
+    # plus _subprocess_compat (it exposes PM's git for the builds). None exist in the OLD
     # tree, and a bare copy of source_completion.py would die on ModuleNotFoundError.
     shutil.copy2(Path(update_completion.__file__).with_name("source_completion.py"),
                  package / "source_completion.py")
     shutil.copy2(Path(update_completion.__file__).with_name("update_lock.py"),
                  package / "update_lock.py")
+    shutil.copy2(Path(update_completion.__file__).with_name("_early_recovery.py"),
+                 package / "_early_recovery.py")
     shutil.copy2(Path(update_completion.__file__).with_name("_subprocess_compat.py"),
                  package / "_subprocess_compat.py")
     (package / "gitlock.py").write_text(
@@ -197,6 +220,18 @@ def transition(tmp_path):
     return root, git, old, new, request
 
 
+def test_transition_refuses_non_fixture_processes(transition):
+    root, *_ = transition
+    with pytest.raises(AssertionError, match="process executable is not fixture-owned"):
+        subprocess.run([str(root / "not-owned.exe")], cwd=root, check=True)
+    with pytest.raises(AssertionError, match="process escaped fixture checkout"):
+        subprocess.run([sys.executable, "-c", "pass"], cwd=root.parent, check=True)
+    with pytest.raises(AssertionError, match="git must stay in the fixture checkout"):
+        subprocess.run(["git", "-C", str(root.parent), "status"], cwd=root, check=True)
+    with pytest.raises(AssertionError, match="process must use the fixture vector"):
+        subprocess.run([sys.executable, "-c", "pass"], cwd=root, shell=True, check=True)
+
+
 @pytest.mark.parametrize("bom_boundary", [None, "request", "receipt"])
 def test_old_process_new_git_tree_completes_in_fresh_python(transition, tmp_path, bom_boundary):
     from hermes_cli import update_completion
@@ -255,8 +290,12 @@ def test_old_process_new_git_tree_completes_in_fresh_python(transition, tmp_path
 def _run_cmd_update(monkeypatch, request, capsys):
     """``hermes update --gateway`` whose impl hands this request to the real post-commit completion."""
     from types import SimpleNamespace
-    from hermes_cli import main, update_cmd, update_receipt
+    from hermes_cli import main, update_cmd, update_receipt, update_owning_install
 
+    monkeypatch.setattr(main, "PROJECT_ROOT", Path(request["source"]))
+    monkeypatch.setattr(update_owning_install, "retarget_to_owning_install", lambda root: None)
+    monkeypatch.setattr(main, "_resume_windows_gateways_after_update",
+                        lambda token: token.update(resume_needed=False))
     monkeypatch.setenv("HERMES_HOME", request["home"])
     monkeypatch.setattr(main, "_update_preflight_handled", lambda args: False)
     monkeypatch.setattr(main, "_install_hangup_protection", lambda **kw: None)
@@ -395,9 +434,13 @@ def test_unwritable_gateway_status_never_fails_a_settled_commit(tmp_path, monkey
 def test_interrupt_after_child_success_demotes_gateway_marker_at_boundary(transition, monkeypatch, cleanup_failure):
     import io
     from types import SimpleNamespace
-    from hermes_cli import main, update_cmd, update_lock, update_receipt
+    from hermes_cli import main, update_cmd, update_lock, update_receipt, update_owning_install
 
     root, _git, _old, _new, request = transition
+    monkeypatch.setattr(main, "PROJECT_ROOT", root)
+    monkeypatch.setattr(update_owning_install, "retarget_to_owning_install", lambda root: None)
+    monkeypatch.setattr(main, "_resume_windows_gateways_after_update",
+                        lambda token: token.update(resume_needed=False))
     marker = Path(request["home"]) / ".update_exit_code"
     (root / "hermes_cli/update_completion.py").write_text(
         "import os, pathlib, time\n"
@@ -414,7 +457,18 @@ def test_interrupt_after_child_success_demotes_gateway_marker_at_boundary(transi
                      else subprocess.TimeoutExpired("completion", 5))
     waits = []
     children = []
+    taskkills = []
     popen = subprocess.Popen
+    run = subprocess.run
+
+    def owned_taskkill(command, **kwargs):
+        if command[0] == "taskkill":
+            assert children and command == ["taskkill", "/T", "/F", "/PID", str(children[0].pid)]
+            taskkills.append(command)
+            return subprocess.CompletedProcess(command, 0)
+        return run(command, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", owned_taskkill)
 
     def capture_child(*args, **kwargs):
         proc = popen(*args, **kwargs)
@@ -468,6 +522,8 @@ def test_interrupt_after_child_success_demotes_gateway_marker_at_boundary(transi
     assert error.value.code == 130
     assert interrupted, "child never published success before cancellation"
     assert children[0].poll() is not None
+    if os.name == "nt":
+        assert len(taskkills) == 1
     assert children[0].stdout.closed
     assert waits and all(timeout is not None and timeout > 0 for timeout in waits)
     assert isinstance(error.value.__cause__, KeyboardInterrupt)
@@ -728,6 +784,12 @@ def test_taskkill_failure_still_reaps_child_and_preserves_interrupt(tmp_path, mo
     (package / "update_completion.py").write_text(
         "import time\nprint('READY', flush=True)\ntime.sleep(60)\n"
     )
+    # This standalone case does not use transition: fence its disposable Python children.
+    selected = tmp_path / "selected-python"
+    venv.EnvBuilder(with_pip=False).create(selected)
+    python = selected / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    monkeypatch.setattr(sys, "executable", str(python))
+    monkeypatch.chdir(tmp_path)
     request = {"source": str(tmp_path), "home": str(tmp_path), "receipt": {"update_id": "test"}}
     interrupted = KeyboardInterrupt("cancel completion")
     child = None
@@ -736,6 +798,18 @@ def test_taskkill_failure_still_reaps_child_and_preserves_interrupt(tmp_path, mo
 
     def capture_child(*args, **kwargs):
         nonlocal child
+        command = args[0]
+        assert isinstance(command, (list, tuple)) and not kwargs.get("shell") and kwargs.get("executable") is None
+        assert Path(command[0]).absolute() == python.absolute(), f"non-fixture executable: {command!r}"
+        if list(command[1:]) == ["-c", "raise SystemExit(9)"]:
+            assert child is not None
+        else:
+            assert child is None and len(command) == 11
+            assert list(command[1:7]) == ["-I", "-S", "-u", "-X", "utf8", "-X"]
+            assert str(command[7]).startswith("pycache_prefix=")
+            assert Path(command[8]) == package / "update_completion.py"
+            assert Path(kwargs["cwd"]).resolve() == tmp_path.resolve()
+            assert kwargs["env"]["HERMES_HOME"] == str(tmp_path)
         proc = popen(*args, **kwargs)
         # The nonzero fault uses a real command, but it is not the completion child.
         if child is None:
@@ -767,6 +841,8 @@ def test_taskkill_failure_still_reaps_child_and_preserves_interrupt(tmp_path, mo
             return result
 
     monkeypatch.setattr(subprocess, "Popen", capture_child)
+    with pytest.raises(AssertionError, match="non-fixture executable"):
+        subprocess.Popen([str(tmp_path.parent / "not-owned.exe")], cwd=tmp_path)
     monkeypatch.setattr(subprocess, "run", failed_taskkill)
     monkeypatch.setattr(sys, "stdout", Interrupt())
     try:

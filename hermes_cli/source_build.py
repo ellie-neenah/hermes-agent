@@ -68,18 +68,20 @@ def product_npm_command(project_root: Path, *, env: dict[str, str]) -> list[str]
     from pm import installed_package
 
     installed = installed_package("node")
+    installed_npm = installed_package("npm")
     node = Path(installed.binary) if installed is not None and installed.binary is not None else None
+    npm_root = Path(installed_npm.path) if installed_npm is not None else None
     resolver = project_root / "scripts" / "build" / "node-deps.mjs"
     npm_cli = next((candidate for candidate in (
-        node.parent / "node_modules" / "npm" / "bin" / "npm-cli.js" if node else None,
-        node.parent.parent / "lib" / "node_modules" / "npm" / "bin" / "npm-cli.js" if node else None,
+        npm_root / "node_modules" / "npm" / "bin" / "npm-cli.js" if npm_root else None,
+        npm_root / "lib" / "node_modules" / "npm" / "bin" / "npm-cli.js" if npm_root else None,
     ) if candidate is not None and candidate.is_file()), None)
     if node is None or not node.is_file() or npm_cli is None or not resolver.is_file():
         raise RuntimeError(
             "Desktop packaging requires the Hermes-managed Node/npm toolchain; contact IT to repair it."
         )
     # node-deps.mjs resolves npm's JavaScript entrypoint before it considers PATH.
-    # Pin its first candidate to this verified Node distribution, never npm.cmd.
+    # Pin its first candidate to PM's recorded npm, never npm.cmd.
     env["npm_execpath"] = str(npm_cli)
     return [str(node), str(resolver), "--npm"]
 

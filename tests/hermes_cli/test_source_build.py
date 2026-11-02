@@ -1,6 +1,6 @@
 """Source orchestration uses real node-deps/npm in an isolated checkout.
 
-Only PM's tool acquisition (and its installed-node record) is substituted with the host's node/npm. Small
+Only PM's tool acquisition and its installed Node/npm records are substituted with the host's node/npm. Small
 workspace scripts stand in for the expensive UI compilers; subprocess failures,
 locked dependency selection, environment propagation and publication are real.
 """
@@ -12,6 +12,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tempfile
 from types import SimpleNamespace
 
 import pytest
@@ -20,11 +21,74 @@ import pm
 from pm.package import Runner
 
 
-def use_host_node_as_pm_node(monkeypatch):
-    """Freshness reads run only under PM's recorded Node; stand the host's node in for it."""
-    node, real = Path(shutil.which("node")), pm.installed_package
-    monkeypatch.setattr(pm, "installed_package", lambda name, **kwargs: (
-        SimpleNamespace(binary=node) if name == "node" else real(name, **kwargs)))
+def use_host_node_as_pm_node(monkeypatch, tmp_path=None):
+    """Expose the host's real Node and npm as test-only PM package records."""
+    node, npm, real = Path(shutil.which("node")), Path(shutil.which("npm")), pm.installed_package
+    npm_cli = (npm.parent / "node_modules" / "npm" / "bin" / "npm-cli.js"
+               if os.name == "nt" else npm.resolve())
+    assert npm_cli.is_file()
+    npm_package = npm_cli.parent.parent
+    temporary_npm = None
+    if npm_package.parent.name == "node_modules":
+        npm_root = npm_package.parent.parent
+    else:
+        # Distribution packages can install npm outside a node_modules tree.
+        # A test-only symlink preserves the real npm tree and its module resolution.
+        if tmp_path is None:
+            temporary_npm = tempfile.TemporaryDirectory(prefix="hermes-test-npm-")
+            tmp_path = Path(temporary_npm.name)
+        npm_root = tmp_path / "host-npm"
+        (npm_root / "node_modules").mkdir(parents=True)
+        (npm_root / "node_modules" / "npm").symlink_to(npm_package, target_is_directory=True)
+
+    def installed_package(name, **kwargs):
+        # Retain the temporary tree until monkeypatch restores the original function.
+        _ = temporary_npm
+        return (SimpleNamespace(binary=node) if name == "node" else
+                SimpleNamespace(path=npm_root) if name == "npm" else real(name, **kwargs))
+
+    monkeypatch.setattr(pm, "installed_package", installed_package)
+
+
+@pytest.mark.parametrize("provide_tmp_path", [False, True])
+def test_source_fixture_supplies_actual_node_and_npm_records(tmp_path, monkeypatch, provide_tmp_path):
+    from hermes_cli.source_build import product_npm_command
+
+    root = tmp_path / "source"
+    resolver = root / "scripts/build/node-deps.mjs"
+    resolver.parent.mkdir(parents=True)
+    for name in ("node-deps.mjs", "electron-runtime.mjs"):
+        shutil.copy2(Path(__file__).resolve().parents[2] / "scripts/build" / name, resolver.parent / name)
+    env = dict(os.environ)
+    node = Path(shutil.which("node"))
+    monkeypatch.setattr(pm, "installed_package", lambda name, **_kwargs: (
+        SimpleNamespace(binary=node) if name == "node" else None))
+    with pytest.raises(RuntimeError, match="Node/npm"):
+        product_npm_command(root, env=env)
+    if provide_tmp_path:
+        use_host_node_as_pm_node(monkeypatch, tmp_path)
+    else:
+        use_host_node_as_pm_node(monkeypatch)
+    command = product_npm_command(root, env=env)
+    result = subprocess.run([*command, "--version"], cwd=root, env=env, capture_output=True, text=True, check=True)
+    assert result.stdout.strip()
+    assert Path(env["npm_execpath"]).is_file()
+    assert Path(command[0]).samefile(shutil.which("node"))
+
+
+@pytest.mark.platforms("posix")
+def test_source_fixture_cleans_up_distribution_npm_without_tmp_path(tmp_path, monkeypatch):
+    npm_cli = tmp_path / "distribution/npm/bin/npm-cli.js"
+    npm_cli.parent.mkdir(parents=True)
+    npm_cli.write_text("// distribution npm", encoding="utf-8")
+    node = Path(shutil.which("node"))
+    with monkeypatch.context() as scoped:
+        scoped.setattr(shutil, "which", lambda name: str(node if name == "node" else npm_cli))
+        use_host_node_as_pm_node(scoped)
+        npm_root = pm.installed_package("npm").path
+        assert (npm_root / "node_modules/npm/bin/npm-cli.js").samefile(npm_cli)
+        assert pm.installed_package("node").binary.samefile(node)
+    assert not npm_root.exists()
 
 
 def copy_freshness_scripts(root):
@@ -91,7 +155,7 @@ def test_product_npm_preflight_replaces_cross_case_inherited_npm_execpath(tmp_pa
     node.write_bytes(b"managed node")
     npm_cli.write_text("// paired npm CLI", encoding="utf-8")
     monkeypatch.setattr(pm, "installed_package", lambda name, **_kwargs: (
-        SimpleNamespace(binary=node) if name == "node" else None))
+        SimpleNamespace(binary=node) if name == "node" else SimpleNamespace(path=node.parent) if name == "npm" else None))
     monkeypatch.setenv("NPM_EXECPATH", str(tmp_path / "foreign" / "npm-cli.js"))
     captured = {}
     monkeypatch.setattr(source_build.subprocess, "run", lambda command, **kwargs: (
@@ -128,7 +192,7 @@ def test_desktop_build_uses_pm_node_resolver_instead_of_npm_cmd(tmp_path, monkey
     denied_npm.parent.mkdir()
     denied_npm.write_text("@echo denied", encoding="utf-8")
     monkeypatch.setattr(pm, "installed_package", lambda name, **_kwargs: (
-        SimpleNamespace(binary=node) if name == "node" else None))
+        SimpleNamespace(binary=node) if name == "node" else SimpleNamespace(path=node.parent) if name == "npm" else None))
     monkeypatch.setattr(pm, "ensure", lambda _name, *, base_env, **_kwargs: SimpleNamespace(env=base_env))
     staging = desktop / ".staging-policy"
     monkeypatch.setattr(main_desktop, "_desktop_ancestor_in", lambda _desktop: None)
@@ -168,8 +232,9 @@ def test_windows_source_desktop_update_keeps_preparation_and_packaging_on_pm_vec
     root = tmp_path / "source"
     desktop = root / "apps" / "desktop"
     resolver = root / "scripts" / "build" / "node-deps.mjs"
-    node = tmp_path / "managed" / "node.exe"
-    npm_cli = node.parent / "node_modules" / "npm" / "bin" / "npm-cli.js"
+    node = tmp_path / "managed-node" / "node.exe"
+    npm_root = tmp_path / "managed-npm"
+    npm_cli = npm_root / "node_modules" / "npm" / "bin" / "npm-cli.js"
     foreign_npm = tmp_path / "foreign" / "npm-cli.js"
     blocked_npm = tmp_path / "blocked" / "npm.CMD"
     for workspace in ("ui-tui", "web", "apps/desktop"):
@@ -188,7 +253,7 @@ def test_windows_source_desktop_update_keeps_preparation_and_packaging_on_pm_vec
 
     monkeypatch.setattr(source_build.sys, "platform", "win32")
     monkeypatch.setattr(pm, "installed_package", lambda name, **_kwargs: (
-        SimpleNamespace(binary=node) if name == "node" else None))
+        SimpleNamespace(binary=node) if name == "node" else SimpleNamespace(path=npm_root) if name == "npm" else None))
     pm_preparation_envs = []
     def ensure(_name, *, base_env, **_kwargs):
         pm_preparation_envs.append(dict(base_env))
@@ -293,7 +358,7 @@ def source_checkout(tmp_path, monkeypatch):
             [str(Path(npm).parent), str(Path(node).parent), os.environ["PATH"]])})
 
     monkeypatch.setattr(pm, "ensure", acquire)
-    use_host_node_as_pm_node(monkeypatch)
+    use_host_node_as_pm_node(monkeypatch, tmp_path)
     root = tmp_path / "source with spaces"
     root.mkdir()
     workspaces = ["ui-tui", "web", "apps/desktop", "unrelated"]

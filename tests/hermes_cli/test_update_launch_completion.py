@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import venv
 
 import pytest
 
@@ -18,6 +19,8 @@ def _no_tool_downloads(monkeypatch):
     """The launch sync publishes lockfile tools first; these tests cover the sync decision."""
     import pm.client
 
+    monkeypatch.delenv("HERMES_SUPERVISED_CHILD", raising=False)
+    monkeypatch.delenv("HERMES_S6_SUPERVISED_CHILD", raising=False)
     monkeypatch.setattr(pm.client, "ensure_tools_for_sync", lambda: None)
 
 
@@ -44,6 +47,46 @@ def completion_tail(monkeypatch):
 
     monkeypatch.setattr(update_custody, "run", run)
     return spawned
+
+
+def _record_fixture_generation(root):
+    """Commit a valid, non-runnable PM generation; the completion child is mocked."""
+    from pm.environments import install_state_dir, managed_environment, venv_python
+    from pm.lock import Facts
+
+    generation = install_state_dir(root) / "environments" / "fixture" / "venv"
+    python = venv_python(generation)
+    python.parent.mkdir(parents=True, exist_ok=True)
+    python.touch()
+    (generation / "pyvenv.cfg").write_text("home = fixture\n")
+    Facts(runtime_facts_path(root)).record_state("venv", "complete", ["all"], environment=generation)
+    assert managed_environment(root).python == python
+    return python
+
+
+def _disposable_relaunch_python(tmp_path, monkeypatch):
+    """The relaunch child must never use the installed test host executable."""
+    selected = tmp_path / "selected-python"
+    venv.EnvBuilder(with_pip=False).create(selected)
+    python = selected / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    monkeypatch.setattr(sys, "executable", str(python))
+    monkeypatch.chdir(tmp_path)
+    popen = subprocess.Popen
+
+    def owned_process(command, *args, **kwargs):
+        assert isinstance(command, (list, tuple)) and not kwargs.get("shell") and kwargs.get("executable") is None
+        assert Path(command[0]).absolute() == python.absolute(), f"non-fixture executable: {command!r}"
+        assert Path(kwargs.get("cwd") or Path.cwd()).resolve() == tmp_path.resolve()
+        return popen(command, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", owned_process)
+    with pytest.raises(AssertionError, match="non-fixture executable"):
+        subprocess.Popen([str(tmp_path.parent / "not-owned.exe")], cwd=tmp_path)
+    with pytest.raises(AssertionError):
+        subprocess.Popen([str(python), "-c", "pass"], cwd=tmp_path.parent)
+    with pytest.raises(AssertionError):
+        subprocess.Popen([str(python), "-c", "pass"], cwd=tmp_path, shell=True)
+    return python
 
 
 def _self_checkout(tmp_path, monkeypatch):
@@ -167,14 +210,15 @@ def test_failed_completion_tail_is_retried_without_rebuilding_dependencies(tmp_p
 
     def sync(extras=None, **kwargs):
         syncs.append(extras)
-        fact.parent.mkdir(parents=True, exist_ok=True)
-        fact.write_text(json.dumps({"packages": {"venv": {"stamp": "complete", "extras": ["all"]}}}))
+        _record_fixture_generation(root)
 
     monkeypatch.setattr(pm, "sync_venv", sync)
     completion_tail.exit_code = 1
     with pytest.raises(RuntimeError, match="run `hermes update`"):
         venv_sync.prepare_launch(root, [])
     assert len(syncs) == 1 and len(completion_tail) == 1
+    from pm.environments import managed_environment
+    assert completion_tail.kwargs["env"]["PYTHON"] == str(managed_environment(root).python)
     assert pm.venv_is_current()
 
     with pytest.raises(RuntimeError, match="run `hermes update`"):
@@ -268,8 +312,7 @@ def test_first_launch_syncs_without_marker_then_uses_completion_fact(tmp_path, m
 
     def sync(extras=None, **kwargs):
         calls.append((extras, kwargs))
-        fact.parent.mkdir(parents=True, exist_ok=True)
-        fact.write_text(json.dumps({"packages": {"venv": {"stamp": "complete", "extras": ["all"]}}}))
+        _record_fixture_generation(root)
 
     monkeypatch.setattr(pm, "sync_venv", sync)
     # A shipped updater may have written this before it reaches an inert shim.
@@ -284,7 +327,8 @@ def test_first_launch_syncs_without_marker_then_uses_completion_fact(tmp_path, m
 
 
 @pytest.mark.parametrize("mode", ["script", "module", "command"])
-def test_relaunch_keeps_invocation_and_checkout_imports(tmp_path, mode):
+def test_relaunch_keeps_invocation_and_checkout_imports(tmp_path, monkeypatch, mode):
+    python = _disposable_relaunch_python(tmp_path, monkeypatch)
     root = tmp_path / "source"
     root.mkdir()
     (root / "checkout_only.py").write_text("value = 'from checkout'\n")
@@ -300,6 +344,12 @@ def test_relaunch_keeps_invocation_and_checkout_imports(tmp_path, mode):
         argv[0] = "-c"
         orig = [sys.executable, "-c", "import entry", *argv[1:]]
     command = venv_sync.relaunch_command(Path(sys.executable), root, argv, orig, module)
+    prefix = (f"import sys, runpy; sys.path.insert(0, {str(root)!r}); sys.argv = {argv!r}; "
+              "sys._hermes_relaunched = True; ")
+    body = ("exec('import entry')" if mode == "command" else
+            "runpy.run_module('entry', run_name='__main__', alter_sys=True)" if mode == "module" else
+            f"runpy.run_path({str(script.absolute())!r}, run_name='__main__')")
+    assert command == [str(python), "-I", "-c", prefix + body]
     result = subprocess.run(command, cwd=tmp_path, capture_output=True, text=True, timeout=30, check=False)
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == ["from checkout", argv[1:]]
@@ -399,13 +449,19 @@ def test_blessed_legacy_install_is_adopted_before_sync(tmp_path, monkeypatch, co
     assert calls == [(["all"],)]
 
 
-def test_relaunch_runs_zip_launchers_and_preserves_interpreter_options(tmp_path):
+def test_relaunch_runs_zip_launchers_and_preserves_interpreter_options(tmp_path, monkeypatch):
     import zipfile
+    python = _disposable_relaunch_python(tmp_path, monkeypatch)
     launcher = tmp_path / "hermes.exe"
     with zipfile.ZipFile(launcher, "w") as archive:
         archive.writestr("__main__.py", "import json,sys; print(json.dumps([sys.argv[1:], sys.stdout.write_through, sys.flags.utf8_mode]))")
     original = [sys.executable, "-u", "-X", "utf8", str(launcher), "arg with spaces"]
     command = venv_sync.relaunch_command(Path(sys.executable), tmp_path, [str(launcher), "arg with spaces"], original, "__main__")
+    argv = [str(launcher), "arg with spaces"]
+    prefix = (f"import sys, runpy; sys.path.insert(0, {str(tmp_path)!r}); sys.argv = {argv!r}; "
+              "sys._hermes_relaunched = True; ")
+    assert command == [str(python), "-u", "-X", "utf8", "-I", "-c", prefix +
+                       f"runpy.run_path({str(launcher.absolute())!r}, run_name='__main__')"]
     result = subprocess.run(command, capture_output=True, text=True, timeout=30, check=False)
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == [["arg with spaces"], True, 1]

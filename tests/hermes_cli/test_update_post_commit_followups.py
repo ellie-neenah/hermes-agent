@@ -115,9 +115,9 @@ def test_failed_web_build_does_not_skip_the_tui(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(source_build, "source_build_env", lambda **kw: {"PATH": ""})
     monkeypatch.setattr(source_build, "prepare_source_dependencies", lambda *a, **kw: None)
     monkeypatch.setattr(source_build, "source_product_current", lambda *a: False)
-    monkeypatch.setattr(source_build, "build_source_tui", lambda root, env: built.append("tui"))
+    monkeypatch.setattr(source_build, "build_source_tui", lambda root, env, *, node: built.append("tui"))
 
-    def broken_web(root, env):
+    def broken_web(root, env, *, node):
         raise subprocess.CalledProcessError(1, ["npm", "run", "build"])
 
     monkeypatch.setattr(source_build, "build_source_web", broken_web)

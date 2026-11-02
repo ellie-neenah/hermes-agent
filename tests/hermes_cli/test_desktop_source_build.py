@@ -89,7 +89,7 @@ def test_manual_gui_preparation_uses_the_pm_node_not_ambient_path(tmp_path, monk
 
     monkeypatch.setattr(main, "PROJECT_ROOT", root)
     monkeypatch.setattr(pm, "installed_package", lambda name, **_kwargs: (
-        SimpleNamespace(binary=node) if name == "node" else None))
+        SimpleNamespace(binary=node) if name == "node" else SimpleNamespace(path=node.parent) if name == "npm" else None))
     monkeypatch.setattr(pm, "ensure", lambda _name, *, base_env, **_kwargs: SimpleNamespace(env=base_env))
     monkeypatch.setattr(main_desktop, "_desktop_launch_env", lambda _args: ({"PATH": str(tmp_path / "ambient")}, []))
     monkeypatch.setattr(main_desktop, "_desktop_build_needed", lambda *_args, **_kwargs: True)

@@ -34,7 +34,7 @@ def test_windows_source_plan_reports_policy_no_go_before_any_update_mutation(tmp
     monkeypatch.setattr(update_owning_install, "retarget_to_owning_install", lambda _root: None)
     monkeypatch.setattr(main, "PROJECT_ROOT", root)
     monkeypatch.setattr(pm, "installed_package", lambda name, **_kwargs: (
-        SimpleNamespace(binary=node) if name == "node" else None))
+        SimpleNamespace(binary=node) if name == "node" else SimpleNamespace(path=node.parent) if name == "npm" else None))
     monkeypatch.setattr(source_build.sys, "platform", "win32")
     monkeypatch.setattr(main.sys, "platform", "win32")
     monkeypatch.setattr(main, "_install_hangup_protection", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("update started")))
@@ -65,7 +65,7 @@ def test_windows_source_plan_reports_direct_resolver_ready_without_npm_cmd(tmp_p
     npm_cmd.write_text("@echo blocked", encoding="utf-8")
     monkeypatch.setattr(main, "PROJECT_ROOT", root)
     monkeypatch.setattr(pm, "installed_package", lambda name, **_kwargs: (
-        SimpleNamespace(binary=node) if name == "node" else None))
+        SimpleNamespace(binary=node) if name == "node" else SimpleNamespace(path=node.parent) if name == "npm" else None))
     monkeypatch.setattr(source_build.sys, "platform", "win32")
     monkeypatch.setattr(main.sys, "platform", "win32")
     monkeypatch.setenv("PATH", str(npm_cmd.parent))
@@ -93,7 +93,7 @@ def test_non_windows_plan_does_not_probe_the_desktop_packaging_vector(tmp_path, 
     root, node, _npm_cli = _source_checkout(tmp_path)
     monkeypatch.setattr(main, "PROJECT_ROOT", root)
     monkeypatch.setattr(pm, "installed_package", lambda name, **_kwargs: (
-        SimpleNamespace(binary=node) if name == "node" else None))
+        SimpleNamespace(binary=node) if name == "node" else SimpleNamespace(path=node.parent) if name == "npm" else None))
     monkeypatch.setattr(main.sys, "platform", "linux")
     monkeypatch.setattr(source_build.sys, "platform", "linux")
     monkeypatch.setattr(source_build.subprocess, "run", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("probe")))
