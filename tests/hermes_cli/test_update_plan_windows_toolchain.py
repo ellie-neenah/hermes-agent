@@ -8,6 +8,8 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 
 def _source_checkout(tmp_path: Path) -> tuple[Path, Path, Path]:
     root = tmp_path / "hermes-agent"
@@ -47,7 +49,9 @@ def test_windows_source_plan_reports_policy_no_go_before_any_update_mutation(tmp
     monkeypatch.setattr(source_build.subprocess, "run", lambda *_args, **_kwargs: (_ for _ in ()).throw(
         OSError(1260, "This program is blocked by group policy")))
 
-    assert main.cmd_update(SimpleNamespace(plan=True, check=False, list_venv_holders=False)) is None
+    with pytest.raises(SystemExit) as exc:
+        main.cmd_update(SimpleNamespace(plan=True, check=False, list_venv_holders=False))
+    assert exc.value.code != 0
 
     out = capsys.readouterr().out
     assert str(node) in out and str(npm_cli) in out

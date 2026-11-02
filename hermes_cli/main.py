@@ -2317,6 +2317,8 @@ def _update_preflight_handled(args) -> bool:
             else:
                 print(f"  ✗ NO-GO: the selected direct packaging vector is unavailable ({toolchain.detail}).")
                 print("    No update work was started. Repair the managed Node/npm toolchain or contact IT.")
+            if not toolchain.ready:
+                sys.exit(1)
         return True
 
     if getattr(args, "list_venv_holders", False):

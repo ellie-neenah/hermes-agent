@@ -209,3 +209,84 @@ def test_moa_advisor_usage_does_not_raise_context_pressure(tmp_path, monkeypatch
     assert agent.context_compressor.last_prompt_tokens == 59
     assert agent._last_prompt_size_tokens == 59
     assert agent.session_prompt_tokens > 10_000
+
+
+def test_quiet_query_keeps_pressure_pending_until_visible(tmp_path, monkeypatch, capsys):
+    from hermes_cli.cli_single_query import _configure_quiet_agent
+
+    agent = _agent(tmp_path, monkeypatch)
+    _configure_quiet_agent(agent)
+    try:
+        capsys.readouterr()
+        _record(agent, _response(60))
+        assert capsys.readouterr().out == ""
+        assert not getattr(agent, "_context_pressure_intervention_emitted", False)
+        agent.suppress_status_output = False
+        _record(agent, _response(60))
+        assert "Context capacity" in capsys.readouterr().out
+        assert agent._context_pressure_intervention_emitted
+    finally:
+        agent.close()
+
+
+def test_suppressed_background_does_not_call_status_or_spend_warning(tmp_path, monkeypatch, capsys):
+    agent = _agent(tmp_path, monkeypatch)
+    delivered = []
+    agent.suppress_status_output = True
+    agent.status_callback = lambda kind, text: delivered.append((kind, text))
+    try:
+        capsys.readouterr()
+        _record(agent, _response(60))
+        assert capsys.readouterr().out == ""
+        assert delivered == []
+        assert not getattr(agent, "_context_pressure_intervention_emitted", False)
+        agent.suppress_status_output = False
+        _record(agent, _response(60))
+        assert len(delivered) == 1
+    finally:
+        agent.close()
+
+
+def test_stream_json_pressure_keeps_stdout_parseable(tmp_path, monkeypatch, capsys):
+    import json
+    from hermes_cli.cli_single_query import _configure_quiet_agent
+    from hermes_cli.stream_json import StreamJsonEmitter
+
+    agent = _agent(tmp_path, monkeypatch)
+    try:
+        capsys.readouterr()
+        emitter = StreamJsonEmitter(model=agent.model, session_id=agent.session_id)
+        _configure_quiet_agent(agent)
+        emitter.attach(agent)
+        _record(agent, _response(60))
+        agent.stream_delta_callback("answer")
+        emitter.emit_result({"final_response": "answer"})
+        events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+        assert [event["type"] for event in events] == ["system", "text", "result"]
+        assert not getattr(agent, "_context_pressure_intervention_emitted", False)
+    finally:
+        agent.close()
+
+
+def test_closed_stdout_does_not_consume_pressure_and_retries(tmp_path, monkeypatch, capsys):
+    import io
+    from contextlib import redirect_stdout
+
+    agent = _agent(tmp_path, monkeypatch)
+    agent._print_fn = None
+    agent.status_callback = lambda _kind, _text: False
+    closed = io.StringIO()
+    closed.close()
+    try:
+        with redirect_stdout(closed):
+            _record(agent, _response(60))
+        assert not getattr(agent, "_context_pressure_intervention_emitted", False)
+        capsys.readouterr()
+        _record(agent, _response(60))
+        output = capsys.readouterr().out
+        assert output.count("Context capacity") == 1
+        assert agent._context_pressure_intervention_emitted
+        _record(agent, _response(80))
+        assert capsys.readouterr().out == ""
+    finally:
+        agent.close()

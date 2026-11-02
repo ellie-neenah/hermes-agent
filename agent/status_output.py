@@ -34,15 +34,17 @@ class StatusOutputMixin:
 
     def _safe_print(self, *args, diagnostic: bool = False, **kwargs):
         """Print that swallows broken pipes / closed stdout (headless stdout can vanish mid-session);
-        routes through ``self._print_fn`` so the CLI can inject an ANSI-aware renderer."""
+        routes through ``self._print_fn`` so the CLI can inject an ANSI-aware renderer.
+        Return False for muted, declined or failed sinks; legacy sinks may return None."""
         if getattr(self, "_mute_notification_reply", False):
-            return
+            return False
         if diagnostic and not self._warning_presentation_enabled():
-            return
+            return False
         try:
-            (self._print_fn or print)(*args, **kwargs)
+            if (self._print_fn or print)(*args, **kwargs) is False:
+                return False
         except (OSError, ValueError):
-            pass
+            return False
 
     def _vprint(self, *args, force: bool = False, diagnostic: bool = False, **kwargs):
         """Verbose print — suppressed while tokens are streaming (allowed during tool execution) and after

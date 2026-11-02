@@ -30,9 +30,10 @@ _CONTEXT_PRESSURE_INTERVENTION_TEXT = (
 
 def _maybe_emit_context_pressure_intervention(agent: Any, prompt_tokens: Any) -> None:
     """Warn once when provider-confirmed occupancy first reaches 60% in a session."""
-    # Muted diagnostic turns suppress their callback without a delivery receipt;
-    # keep the session-wide warning pending for the next visible turn.
-    if getattr(agent, "_mute_notification_reply", False):
+    # Suppressed and muted turns have no visible delivery; leave the warning
+    # pending for a later visible turn, including when a callback is installed.
+    if (getattr(agent, "_mute_notification_reply", False)
+            or getattr(agent, "suppress_status_output", False)):
         return
     if getattr(agent, "_context_pressure_intervention_emitted", False):
         return
@@ -66,8 +67,8 @@ def _maybe_emit_context_pressure_intervention(agent: Any, prompt_tokens: Any) ->
     printer = getattr(agent, "_safe_print", None)
     if callable(printer):
         try:
-            printer(text)
-            agent._context_pressure_intervention_emitted = True
+            if printer(text) is not False:
+                agent._context_pressure_intervention_emitted = True
         except Exception:
             logger.debug("context-pressure CLI fallback failed", exc_info=True)
 
