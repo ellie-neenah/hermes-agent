@@ -78,8 +78,17 @@ test('execProbe keeps the parent event loop available to the child', async () =>
   assert.ifError(unexpectedSocketError)
 })
 
+test('a timed-out child that handles SIGTERM and exits normally is classified as a timeout', () => {
+  // POSIX close reports the exit code and a null signal after a handled SIGTERM.
+  assert.equal(isTimeoutError({ code: 0, signal: null, killed: true }), true)
+  assert.equal(isTimeoutError({ code: 1, signal: null, killed: true }), true)
+})
+
 test('SIGTERM without a killed child is not a bounded probe timeout', () => {
   assert.equal(isTimeoutError({ signal: 'SIGTERM', killed: false }), false)
+  assert.equal(isTimeoutError({ code: 0, signal: null, killed: false }), false)
+  assert.equal(isTimeoutError({ code: null, signal: 'SIGKILL', killed: true }), false)
+  assert.equal(isTimeoutError({ code: 'ETIMEDOUT', signal: null, killed: true }), false)
 })
 
 test('bare ETIMEDOUT without child-termination evidence is not a bounded probe timeout', () => {

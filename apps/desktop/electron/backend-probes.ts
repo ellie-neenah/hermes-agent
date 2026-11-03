@@ -36,11 +36,11 @@ function isTimeoutError(err: unknown): boolean {
     return false
   }
 
-  const e = err as { killed?: boolean; signal?: string }
+  const e = err as { code?: unknown; killed?: boolean; signal?: string | null }
 
-  // execProbe itself creates the recoverable timeout by terminating its child.
+  // A child that handles the timeout's SIGTERM can exit normally, with no signal.
   // A bare ETIMEDOUT can come from an unrelated spawn or transport failure.
-  return e.signal === 'SIGTERM' && e.killed === true
+  return e.killed === true && (e.signal === 'SIGTERM' || (e.signal === null && typeof e.code === 'number'))
 }
 
 /**
