@@ -575,7 +575,12 @@ import {
 } from './session-windows'
 import { ensureLoginShellPath } from './shell-path'
 import { removeStaleSingletonLock } from './singleton-lock'
-import { createSourcePythonBackend, resolveSourceInstallationBackend, type SourceBackend } from './source-backend'
+import {
+  createSourcePythonBackend,
+  isSourceRuntimeUsable,
+  resolveSourceInstallationBackend,
+  type SourceBackend
+} from './source-backend'
 import { resolveSourcePython } from './source-python'
 import { registerSpellcheckDictionaryIpc } from './spellcheck-dictionary-ipc'
 import { resolveSshBinary, windowsSshEnv } from './ssh-binary'
@@ -4405,7 +4410,10 @@ async function handOffWindowsBootstrapRecovery(reason) {
   // Recovery can run without Python. Keep the chosen branch; do not guess a replacement.
   const branch: string = configuredBranch || DEFAULT_UPDATE_BRANCH
 
-  const updaterArgs: string[] = chooseUpdaterArgs({ runtimeUsable: await isSourceRuntimeUsable(updateRoot) }, branch)
+  const updaterArgs: string[] = chooseUpdaterArgs(
+    { runtimeUsable: await isSourceRuntimeUsable(updateRoot, { hermesHome: HERMES_HOME }) },
+    branch
+  )
 
   await stopBackendsForUpdate()
 
@@ -4515,15 +4523,6 @@ function readJson(filePath) {
 //   }
 function readBootstrapMarker() {
   return readJson(BOOTSTRAP_COMPLETE_MARKER)
-}
-
-// Marker-independent: is the canonical install at ACTIVE_HERMES_ROOT actually
-// runnable right now? A complete CLI install (`install.sh --include-desktop`)
-// or a DMG launch over a prior CLI install satisfies this WITHOUT the desktop
-// ever having written the bootstrap marker -- so we must be able to recognise
-// "already installed" off the filesystem alone, not just the marker.
-async function isSourceRuntimeUsable(root: string): Promise<boolean> {
-  return (await resolveSourceInstallationBackend(root, [], { hermesHome: HERMES_HOME })) !== null
 }
 
 function activeRuntimeState(backend: SourceBackend | null): ActiveRuntimeState {
@@ -4946,7 +4945,7 @@ async function resolveHermesBackend(backendArgs: string[]): Promise<ResolvedHerm
   const activeRuntime: ActiveRuntimeState = activeRuntimeState(activeBackend)
 
   if (activeBackend && !bootstrapRepairRequested) {
-    if (!activeRuntime.hasValidMarker) {
+    if (!activeRuntime.hasValidMarker && activeBackend.verification !== 'timed-out') {
       rememberLog(
         `[bootstrap] Active Hermes runtime at ${ACTIVE_HERMES_ROOT} is usable but the bootstrap marker is missing or stale; skipping first-run bootstrap.`
       )
@@ -5019,6 +5018,7 @@ interface ResolvedHermesBackend {
   shell: boolean
   local?: string
   root?: string
+  verification?: SourceBackend['verification']
   ticketCommand?: string
   ticketEnv?: NodeJS.ProcessEnv
   installStamp?: Readonly<InstallStamp> | null
@@ -5036,6 +5036,10 @@ async function ensureRuntime(
   assertStillOwned()
 
   if (!backend.bootstrap) {
+    if (backend.verification === 'timed-out') {
+      rememberLog('[backend] source launcher verification timed out after one retry; starting the existing installation')
+    }
+
     rememberLog(`[backend] using ${backend.label}`)
     await advanceBootProgress('runtime.external', `Using ${backend.label}`, 32)
 

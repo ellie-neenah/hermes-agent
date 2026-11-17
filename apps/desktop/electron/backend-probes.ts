@@ -1,6 +1,7 @@
 /** Bounded backend probes. A file on disk is not proof of a usable runtime. */
 
-import { spawn } from 'node:child_process'
+import { spawn, type ChildProcess } from 'node:child_process'
+import path from 'node:path'
 
 import { buildDesktopBackendEnv } from './backend-env'
 import { windowsShellCommand } from './windows-child-options'
@@ -31,27 +32,36 @@ function resolveProbeTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
 
 const PROBE_TIMEOUT_MS = resolveProbeTimeoutMs()
 
+async function killProbeProcessTree(child: ChildProcess): Promise<boolean> {
+  if (process.platform !== 'win32') {
+    return child.kill('SIGKILL')
+  }
+
+  if (child.pid === undefined) {
+    throw new Error('Cannot terminate runtime probe process tree without a process ID')
+  }
+
+  const taskkillPath = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'taskkill.exe')
+
+  return new Promise<boolean>((resolve, reject) => {
+    const taskkill = spawn(taskkillPath, ['/PID', String(child.pid), '/T', '/F'], {
+      stdio: 'ignore',
+      windowsHide: true
+    })
+    taskkill.once('error', reject)
+    taskkill.once('close', (code, signal) => {
+      if (code === 0) {
+        resolve(true)
+      } else {
+        reject(new Error(`Runtime probe process-tree termination failed (${signal || code}): ${child.pid}`))
+      }
+    })
+  })
+}
+class ProbeTimeoutError extends Error {}
+
 function isTimeoutError(err: unknown): boolean {
-  if (!err || typeof err !== 'object') {
-    return false
-  }
-
-  const e = err as { code?: string; killed?: boolean; signal?: string }
-
-  if (e.killed === true) {
-    return true
-  }
-
-  if (e.code === 'ETIMEDOUT') {
-    return true
-  }
-
-  // Node marks timed-out execFileSync with SIGTERM on some platforms.
-  if (e.signal === 'SIGTERM') {
-    return true
-  }
-
-  return false
+  return err instanceof ProbeTimeoutError
 }
 
 /**
@@ -70,23 +80,47 @@ async function execProbe(
     windowsHide?: boolean
   }
 ): Promise<void> {
+  const { timeout, ...spawnOptions } = options
   const run = () =>
     new Promise<void>((resolve, reject) => {
-      const child = spawn(command, args, options)
-      child.once('error', reject)
+      const child = spawn(command, args, spawnOptions)
+      let deadlineTermination: Promise<boolean> | undefined
+      const timer = setTimeout(() => {
+        deadlineTermination = killProbeProcessTree(child)
+        void deadlineTermination.catch(error => reject(error))
+      }, timeout)
+
+      child.once('exit', () => clearTimeout(timer))
+      child.once('error', error => {
+        clearTimeout(timer)
+        reject(error)
+      })
       child.once('close', (code, signal) => {
-        // A timed-out probe may handle SIGTERM and exit zero; it is still a timeout.
-        if (code === 0 && !child.killed) {
-          resolve()
-        } else {
-          reject(
-            Object.assign(new Error(`Runtime probe failed: ${command} (${signal || code})`), {
-              code,
-              signal,
-              killed: child.killed
-            })
-          )
-        }
+        clearTimeout(timer)
+        void (async () => {
+          let deadlineKilledChild = false
+
+          try {
+            deadlineKilledChild = (await deadlineTermination) ?? false
+          } catch (error) {
+            reject(error)
+            return
+          }
+
+          if (deadlineKilledChild) {
+            reject(new ProbeTimeoutError(`Runtime probe timed out after ${timeout} ms: ${command}`))
+          } else if (code === 0 && !child.killed) {
+            resolve()
+          } else {
+            reject(
+              Object.assign(new Error(`Runtime probe failed: ${command} (${signal || code})`), {
+                code,
+                signal,
+                killed: child.killed
+              })
+            )
+          }
+        })()
       })
     })
 

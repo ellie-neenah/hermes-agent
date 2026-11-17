@@ -1,11 +1,11 @@
 /**
  * Tests for electron/backend-probes.ts.
  *
- * Run with: node --test electron/backend-probes.test.ts
  * (Wired into pnpm run test:desktop:platforms in package.json.)
  */
 
 import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import net from 'node:net'
 import os from 'node:os'
@@ -17,11 +17,15 @@ import {
   canImportHermesCli,
   DEFAULT_PROBE_TIMEOUT_MS,
   execProbe,
+  isTimeoutError,
   PROBE_TIMEOUT_MS,
   resolveProbeTimeoutMs,
   shouldTrustHermesOverride,
   verifyHermesCli
 } from './backend-probes'
+import { createFirstRunSetupGate } from './first-run-setup-gate'
+import { isSourceRuntimeUsable, resolveSourceInstallationBackend } from './source-backend'
+import { chooseUpdaterArgs } from './windows-hermes-path'
 
 // Resolve the host's own Node binary -- guaranteed to be on disk and
 // runnable. We use it as both a stand-in for "a python that doesn't
@@ -75,6 +79,221 @@ test('execProbe keeps the parent event loop available to the child', async () =>
   }
 
   assert.ifError(unexpectedSocketError)
+})
+
+// Self-expire with a failure so the test also finishes on a build that never
+// enforces the probe deadline.
+const slowProbe = `
+  const fs = require('node:fs')
+  const [attempts, scenario] = process.argv.slice(1)
+  fs.appendFileSync(attempts, 'x')
+  const first = fs.readFileSync(attempts, 'utf8') === 'x'
+  if (first || scenario === 'both-slow') {
+    setTimeout(() => process.exit(91), 2000)
+  } else {
+    process.exit(scenario === 'retry-fails' ? 23 : 0)
+  }
+`
+const probeOptions = {
+  stdio: 'ignore' as const,
+  timeout: 650,
+  windowsHide: true
+}
+
+test('a real probe deadline allows exactly one retry, which can succeed', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-probe-retry-'))
+  const attempts = path.join(root, 'attempts')
+
+  try {
+    await execProbe(NODE_BIN, ['-e', slowProbe, attempts, 'retry-succeeds'], probeOptions)
+    assert.equal(fs.readFileSync(attempts, 'utf8'), 'xx')
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+function withSourceFixture(callback: (root: string, launcher: string) => Promise<void>) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-source-probe-'))
+  const launcher = path.join(root, '.hermes', 'bin', process.platform === 'win32' ? 'hermes.exe' : 'hermes')
+
+  return (async () => {
+    try {
+      fs.mkdirSync(path.join(root, 'hermes_cli'))
+      fs.writeFileSync(path.join(root, 'hermes_cli', 'main.py'), '')
+      fs.mkdirSync(path.dirname(launcher), { recursive: true })
+      fs.writeFileSync(launcher, 'fixture; the probe seam selects the test executable')
+      await callback(root, launcher)
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  })()
+}
+
+test('two real launcher probe deadlines keep the existing backend out of first-run setup', async () => {
+  await withSourceFixture(async (root, launcher) => {
+    const attempts = path.join(root, 'attempts')
+    const args = ['gateway', 'ensure', '--json']
+    const backend = await resolveSourceInstallationBackend(root, args, {
+      probe: (command, argv, options) => {
+        assert.equal(command, launcher)
+        assert.deepEqual(argv, ['--version'])
+
+        return execProbe(NODE_BIN, ['-e', slowProbe, attempts, 'both-slow'], {
+          ...options,
+          ...probeOptions
+        })
+      }
+    })
+
+    assert.ok(backend, 'the final bounded timeout must retain the source install')
+    assert.equal(fs.readFileSync(attempts, 'utf8'), 'xx')
+    assert.equal(backend.command, launcher)
+    assert.deepEqual(backend.args, args)
+    assert.equal(backend.bootstrap, false)
+    assert.equal(backend.local, 'installed')
+    assert.equal(backend.verification, 'timed-out')
+    assert.equal(createFirstRunSetupGate().shouldGate(backend), false)
+  })
+})
+
+async function sourceUpdaterArgs(root: string, probe: typeof execProbe): Promise<string[]> {
+  // Use only the fixture launcher, never an ambient Hermes home.
+  const runtimeUsable = await isSourceRuntimeUsable(root, {
+    hermesHome: path.join(root, '.hermes'),
+    probe
+  })
+  return chooseUpdaterArgs({ runtimeUsable }, 'release/1.2')
+}
+
+test('source updater selects update after successful launcher verification', async () => {
+  await withSourceFixture(async (root, launcher) => {
+    const args = await sourceUpdaterArgs(root, (command, argv, options) => {
+      assert.equal(command, launcher)
+      assert.deepEqual(argv, ['--version'])
+      return execProbe(NODE_BIN, ['--version'], options)
+    })
+
+    assert.deepEqual(args, ['--update', '--branch', 'release/1.2'])
+  })
+})
+
+test('source updater selects repair after two real launcher probe deadlines', async () => {
+  await withSourceFixture(async (root, launcher) => {
+    const attempts = path.join(root, 'attempts')
+    const args = await sourceUpdaterArgs(root, (command, argv, options) => {
+      assert.equal(command, launcher)
+      assert.deepEqual(argv, ['--version'])
+      return execProbe(NODE_BIN, ['-e', slowProbe, attempts, 'both-slow'], {
+        ...options,
+        ...probeOptions
+      })
+    })
+
+    assert.equal(fs.readFileSync(attempts, 'utf8'), 'xx')
+    assert.deepEqual(args, ['--repair', '--branch', 'release/1.2'])
+  })
+})
+
+test('source updater selects repair when the launcher is missing', async () => {
+  await withSourceFixture(async (root, launcher) => {
+    fs.unlinkSync(launcher)
+    let attempts = 0
+    const args = await sourceUpdaterArgs(root, async () => {
+      attempts += 1
+    })
+
+    assert.equal(attempts, 0)
+    assert.deepEqual(args, ['--repair', '--branch', 'release/1.2'])
+  })
+})
+
+test('source updater selects repair when the launcher exits nonzero', async () => {
+  await withSourceFixture(async (root, launcher) => {
+    const attempts = path.join(root, 'attempts')
+    const args = await sourceUpdaterArgs(root, (command, argv, options) => {
+      assert.equal(command, launcher)
+      assert.deepEqual(argv, ['--version'])
+      const script = `require('node:fs').appendFileSync(process.argv[1], 'x'); process.exit(23)`
+      return execProbe(NODE_BIN, ['-e', script, attempts], options)
+    })
+
+    assert.equal(fs.readFileSync(attempts, 'utf8'), 'x')
+    assert.deepEqual(args, ['--repair', '--branch', 'release/1.2'])
+  })
+})
+
+test('non-timeout source launcher failures still fall through', async () => {
+  await withSourceFixture(async (root, launcher) => {
+    const attempts = path.join(root, 'attempts')
+    const resolveWith = (probe: typeof execProbe) => resolveSourceInstallationBackend(root, ['serve'], { probe })
+    const run = (script: string) =>
+      execProbe(NODE_BIN, ['-e', script, attempts], {
+        ...probeOptions,
+        timeout: 4000
+      })
+    const record = `require('node:fs').appendFileSync(process.argv[1], 'x'); `
+
+    // Also check successful verification does not get tagged as recovery.
+    const verified = await resolveWith(() => run('process.exit(0)'))
+    assert.ok(verified)
+    assert.equal(verified.verification, undefined)
+
+    for (const script of ['process.exit(23)', `process.kill(process.pid, 'SIGTERM')`]) {
+      fs.writeFileSync(attempts, '')
+      assert.equal(await resolveWith(() => run(record + script)), null)
+      assert.equal(fs.readFileSync(attempts, 'utf8'), 'x', `must not retry ${script}`)
+    }
+
+    fs.writeFileSync(attempts, '')
+    assert.equal(
+      await resolveWith(() => execProbe(NODE_BIN, ['-e', slowProbe, attempts, 'retry-fails'], probeOptions)),
+      null
+    )
+    assert.equal(fs.readFileSync(attempts, 'utf8'), 'xx')
+
+    const missing = path.join(root, 'missing.exe')
+    await assert.rejects(execProbe(missing, [], probeOptions), {
+      code: 'ENOENT'
+    })
+    assert.equal(await resolveWith(() => execProbe(missing, [], probeOptions)), null)
+    assert.equal(
+      await resolveWith(async () => {
+        throw Object.assign(new Error('permission denied'), { code: 'EACCES' })
+      }),
+      null
+    )
+
+    fs.unlinkSync(launcher)
+    let probed = false
+    assert.equal(
+      await resolveWith(async () => {
+        probed = true
+      }),
+      null
+    )
+    assert.equal(probed, false)
+  })
+})
+
+test.skipIf(process.platform === 'win32')('a real non-executable source launcher is not recovered', async () => {
+  await withSourceFixture(async (root, launcher) => {
+    fs.chmodSync(launcher, 0o644)
+    await assert.rejects(execProbe(launcher, [], probeOptions), {
+      code: 'EACCES'
+    })
+    assert.equal(await resolveSourceInstallationBackend(root, ['serve']), null)
+  })
+})
+
+test('timeout-shaped errors without probe deadline provenance are not timeouts', () => {
+  for (const error of [
+    { code: 'ETIMEDOUT' },
+    { signal: 'SIGTERM', killed: false },
+    { signal: 'SIGTERM', killed: true },
+    { signal: 'SIGKILL', killed: true }
+  ]) {
+    assert.equal(isTimeoutError(error), false, JSON.stringify(error))
+  }
 })
 
 test('canImportHermesCli returns false when path is falsy', async () => {
@@ -178,3 +397,211 @@ test('resolveProbeTimeoutMs honours HERMES_PROBE_TIMEOUT_MS', () => {
   // Cap runaway values
   assert.equal(resolveProbeTimeoutMs({ HERMES_PROBE_TIMEOUT_MS: '999999' }), 120_000)
 })
+
+interface WindowsProcessInfo {
+  ProcessId: number
+  ParentProcessId: number
+  Name: string
+  CommandLine: string
+}
+
+function windowsProcessSnapshot(pids: number[]): WindowsProcessInfo[] {
+  const filter = pids.map(pid => `ProcessId = ${pid}`).join(' OR ')
+  const command = `$items = @(Get-CimInstance Win32_Process -Filter '${filter}'); $items | Select-Object ProcessId,ParentProcessId,Name,CommandLine | ConvertTo-Json -Compress`
+  const output = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], {
+    encoding: 'utf8',
+    windowsHide: true
+  }).trim()
+  if (!output) return []
+  const parsed = JSON.parse(output) as WindowsProcessInfo | WindowsProcessInfo[]
+  return Array.isArray(parsed) ? parsed : [parsed]
+}
+
+interface FixtureProcess {
+  pid: number
+  parentPid: number
+  token: string
+}
+
+function readFixtureProcesses(file: string): FixtureProcess[] {
+  if (!fs.existsSync(file)) return []
+  return fs
+    .readFileSync(file, 'utf8')
+    .trim()
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map(line => JSON.parse(line) as FixtureProcess)
+}
+
+async function waitForFixtureProcesses(file: string, count: number, timeout: number): Promise<FixtureProcess[]> {
+  const deadline = Date.now() + timeout
+  while (Date.now() < deadline) {
+    const processes = readFixtureProcesses(file)
+    if (processes.length >= count) return processes
+    await new Promise(resolve => setTimeout(resolve, 25))
+  }
+  throw new Error(`test-owned .cmd wrapper did not launch ${count} children before the deadline`)
+}
+
+async function cleanFixtureProcesses(
+  records: FixtureProcess[],
+  script: string,
+  wrapper: string,
+  token: string
+): Promise<void> {
+  const targets = records.flatMap(record => [
+    {
+      pid: record.parentPid,
+      isOwned: (processInfo: WindowsProcessInfo) =>
+        processInfo.Name.toLowerCase() === 'cmd.exe' &&
+        processInfo.CommandLine.toLowerCase().includes(wrapper.toLowerCase())
+    },
+    {
+      pid: record.pid,
+      isOwned: (processInfo: WindowsProcessInfo) =>
+        processInfo.Name.toLowerCase() === 'node.exe' &&
+        processInfo.ParentProcessId === record.parentPid &&
+        processInfo.CommandLine.toLowerCase().includes(script.toLowerCase()) &&
+        processInfo.CommandLine.includes(token)
+    }
+  ])
+  const pids = targets.map(target => target.pid)
+  const live = windowsProcessSnapshot(pids)
+
+  for (const target of targets) {
+    const processInfo = live.find(processInfo => processInfo.ProcessId === target.pid)
+    if (!processInfo) continue
+    if (!target.isOwned(processInfo)) {
+      throw new Error(`Fixture PID ${target.pid} no longer matches its recorded process; refusing to terminate it`)
+    }
+
+    try {
+      process.kill(target.pid, 'SIGKILL')
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error
+    }
+  }
+
+  const deadline = Date.now() + 5000
+  while (Date.now() < deadline) {
+    const remaining = windowsProcessSnapshot(pids)
+
+    for (const processInfo of remaining) {
+      const target = targets.find(target => target.pid === processInfo.ProcessId)
+      if (target && !target.isOwned(processInfo)) {
+        throw new Error(`Fixture PID ${processInfo.ProcessId} changed identity; refusing to terminate it`)
+      }
+    }
+    if (remaining.length === 0) return
+    await new Promise(resolve => setTimeout(resolve, 25))
+  }
+
+  throw new Error('test-owned fixture processes remained alive after cleanup')
+}
+test.skipIf(process.platform !== 'win32')(
+  'a real .cmd source probe kills its child tree before the bounded retry',
+  async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes .cmd probe-'))
+    const wrapper = path.join(root, '.hermes', 'bin', 'hermes.cmd')
+    const script = path.join(root, 'test-owned child.cjs')
+    const recordsFile = path.join(root, 'processes.jsonl')
+    const token = `fixture-${process.pid}-${Date.now()}`
+    fs.mkdirSync(path.dirname(wrapper), { recursive: true })
+    fs.mkdirSync(path.join(root, 'hermes_cli'), { recursive: true })
+    fs.writeFileSync(path.join(root, 'hermes_cli', 'main.py'), '')
+    fs.writeFileSync(
+      script,
+      `
+    const fs = require('node:fs')
+    const [recordsFile, token] = process.argv.slice(2)
+    if (process.env.HERMES_PROBE_FIXTURE_SUCCESS === '1') process.exit(0)
+    fs.appendFileSync(recordsFile, JSON.stringify({ pid: process.pid, parentPid: process.ppid, token }) + '\\n')
+    setInterval(() => {}, 1000)
+  `
+    )
+    fs.writeFileSync(wrapper, `@echo off\r\n"${process.execPath}" "${script}" "${recordsFile}" "${token}" %*\r\n`)
+
+    const probe: typeof execProbe = (command, args, options) => {
+      assert.equal(command, `"${wrapper}"`)
+      assert.deepEqual(args, ['--version'])
+      assert.equal(options.shell, true)
+      return execProbe(command, args, { ...options, timeout: 3500 })
+    }
+
+    try {
+      const verified = await resolveSourceInstallationBackend(root, ['serve'], {
+        env: { ...process.env, HERMES_PROBE_FIXTURE_SUCCESS: '1' },
+        probe
+      })
+      assert.ok(verified)
+      assert.equal(verified.verification, undefined)
+
+      const outcome = resolveSourceInstallationBackend(root, ['serve'], {
+        env: { ...process.env, HERMES_PROBE_FIXTURE_SUCCESS: '0' },
+        probe
+      }).then(
+        backend => ({ ok: true as const, backend }),
+        error => ({ ok: false as const, error })
+      )
+      let records = await waitForFixtureProcesses(recordsFile, 1, 2500)
+      const record = records[0]
+      {
+        const initial = windowsProcessSnapshot([record.pid, record.parentPid])
+        const child = initial.find(process => process.ProcessId === record.pid)
+        const parent = initial.find(process => process.ProcessId === record.parentPid)
+        assert.equal(child?.ParentProcessId, record.parentPid)
+        assert.equal(child?.Name.toLowerCase(), 'node.exe')
+        assert.ok(child?.CommandLine.toLowerCase().includes(script.toLowerCase()))
+        assert.equal(parent?.Name.toLowerCase(), 'cmd.exe')
+        assert.ok(parent?.CommandLine.toLowerCase().includes(wrapper.toLowerCase()))
+      }
+
+      records = await waitForFixtureProcesses(recordsFile, 2, 7000)
+      const first = windowsProcessSnapshot([records[0].pid])[0]
+      assert.ok(
+        !first ||
+          first.Name.toLowerCase() !== 'node.exe' ||
+          !first.CommandLine.toLowerCase().includes(script.toLowerCase()),
+        'retry must start only after the first child tree has exited'
+      )
+      const second = records[1]
+      const secondSnapshot = windowsProcessSnapshot([second.pid, second.parentPid])
+      const secondChild = secondSnapshot.find(process => process.ProcessId === second.pid)
+      const secondParent = secondSnapshot.find(process => process.ProcessId === second.parentPid)
+      assert.equal(secondChild?.ParentProcessId, second.parentPid)
+      assert.equal(secondChild?.Name.toLowerCase(), 'node.exe')
+      assert.ok(secondChild?.CommandLine.toLowerCase().includes(script.toLowerCase()))
+      assert.equal(secondParent?.Name.toLowerCase(), 'cmd.exe')
+      assert.ok(secondParent?.CommandLine.toLowerCase().includes(wrapper.toLowerCase()))
+      const result = await outcome
+      assert.equal(result.ok, true)
+      if (result.ok) {
+        assert.ok(result.backend)
+        assert.equal(result.backend.verification, 'timed-out')
+        assert.equal(result.backend.command, `"${wrapper}"`)
+        assert.deepEqual(result.backend.args, ['serve'])
+        assert.equal(result.backend.bootstrap, false)
+        assert.equal(result.backend.shell, true)
+      }
+      records = readFixtureProcesses(recordsFile)
+      assert.equal(records.length, 2, 'the deadline must trigger exactly one bounded retry')
+      assert.ok(records.every(record => record.token === token))
+
+      const live = records.flatMap(record => {
+        const process = windowsProcessSnapshot([record.pid])[0]
+        return process &&
+          process.Name.toLowerCase() === 'node.exe' &&
+          process.CommandLine.toLowerCase().includes(script.toLowerCase()) &&
+          process.CommandLine.includes(token)
+          ? [record.pid]
+          : []
+      })
+      assert.deepEqual(live, [], 'timing out the .cmd wrapper must not leave fixture children alive')
+    } finally {
+      const records = readFixtureProcesses(recordsFile)
+      await cleanFixtureProcesses(records, script, wrapper, token)
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  },
+  60000
+)
