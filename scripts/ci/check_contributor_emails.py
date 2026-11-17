@@ -2,9 +2,9 @@
 """Fail when a commit since the merge base with origin/main has an unmapped author email.
 
 Run by the ``Check for unmapped contributor emails`` step of
-``.github/workflows/repo-guards.yml``. An email is mapped if it has a file in
-``contributors/emails/`` (one file per email, conflict-free) or an entry in the frozen legacy
-AUTHOR_MAP in ``scripts/releases/authors_legacy.py``. Maintainer, bot and GitHub id+login
+``.github/workflows/repo-guards.yml``. An email is mapped if it has a contributor record under ``contributors/emails/``
+or an entry in the frozen legacy AUTHOR_MAP in
+``scripts/releases/authors_legacy.py``. Maintainer, bot and GitHub id+login
 noreply emails are skipped. Writes the ``contributor-check`` review status
 (scripts/ci/review_status.py).
 
@@ -23,6 +23,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from scripts.ci.review_status import action_required, publish
+from scripts.releases.authors import AUTHOR_MAP
 
 ARTIFACT = "contributor-check"
 GIT_TIMEOUT = 120
@@ -74,7 +75,7 @@ def is_mapped(email: str, legacy_map: str) -> bool:
         return True
     if GITHUB_NOREPLY.search(email):
         return True
-    if Path("contributors/emails", email).is_file():
+    if email in AUTHOR_MAP:
         return True
     return f'"{email}"' in legacy_map
 
