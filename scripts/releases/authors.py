@@ -1,35 +1,35 @@
 """Map commit authors to GitHub logins for release notes and attribution checks.
 
 ``AUTHOR_MAP`` merges the frozen ``LEGACY_AUTHOR_MAP`` (authors_legacy.py) with
-the one-file-per-email entries under ``contributors/emails/``; the directory
-wins on duplicates.
+legacy email-named files and hash-named JSON records under
+``contributors/emails/``; contributor records win on duplicates.
 """
 from __future__ import annotations
 
 import re
 from pathlib import Path
 
+from scripts.contributor_mappings import load_safe_mappings
 from scripts.releases.authors_legacy import LEGACY_AUTHOR_MAP
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # ──────────────────────────────────────────────────────────────────────
-# Directory-based mappings: contributors/emails/<email> → login
+# Directory-based mappings under contributors/emails/
 # ──────────────────────────────────────────────────────────────────────
 CONTRIBUTORS_EMAILS_DIR = REPO_ROOT / "contributors" / "emails"
 
 
-def _load_contributor_dir(directory: Path | None = None) -> dict:
-    """Load one-file-per-email mappings from contributors/emails/.
+def _load_contributor_dir(directory: Path | None = None) -> dict[str, str]:
+    """Load legacy email-named files and hash-named JSON mappings.
 
-    Filename = commit-author email, first non-comment line = GitHub login.
-    Additions never merge-conflict (each mapping is a distinct file), which
-    is why new entries go here instead of the frozen LEGACY_AUTHOR_MAP.
+    Legacy filenames remain readable. New mappings use a SHA-256 filename
+    and store the email and login in the JSON record.
     """
     directory = directory or CONTRIBUTORS_EMAILS_DIR
     mapping = {}
     if not directory.is_dir():
-        return mapping
+        return load_safe_mappings(directory)
     for path in sorted(directory.iterdir()):
         if not path.is_file() or path.name.startswith("."):
             continue
@@ -41,10 +41,10 @@ def _load_contributor_dir(directory: Path | None = None) -> dict:
                     break
         except OSError:
             continue
-    return mapping
+    return {**mapping, **load_safe_mappings(directory)}
 
 
-# Effective map: frozen legacy dict + directory entries (directory wins).
+# Effective map: frozen legacy dict + contributor records (records win).
 AUTHOR_MAP = {**LEGACY_AUTHOR_MAP, **_load_contributor_dir()}
 
 

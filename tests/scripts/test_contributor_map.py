@@ -1,11 +1,10 @@
-"""Tests for the conflict-free contributor mapping system.
+"""Tests for the contributor mapping system.
 
-New contributor email → GitHub login mappings live as one file per email
-under contributors/emails/ (additions never merge-conflict). The legacy
-AUTHOR_MAP dict in scripts/releases/authors_legacy.py is frozen; authors.py
-merges both at import time with the directory winning on duplicates.
+New mappings use hash-named JSON records while existing email-named records
+remain readable. The legacy AUTHOR_MAP dict is frozen.
 """
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -15,12 +14,13 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS_DIR = REPO_ROOT / "scripts"
 
-sys.path.insert(0, str(REPO_ROOT))
-sys.path.insert(0, str(SCRIPTS_DIR))
+if __package__ in (None, ""):
+    sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.releases import authors, authors_legacy
-from add_contributor import add_contributor, read_mapping_file
-
+from scripts import add_contributor, audit_pr_attribution  # noqa: E402
+from scripts.ci import check_contributor_emails  # noqa: E402
+from scripts.contributor_mappings import safe_mapping_path  # noqa: E402
+from scripts.releases import authors, authors_legacy  # noqa: E402
 
 # ── directory loader behavior ─────────────────────────────────────────
 
@@ -48,40 +48,61 @@ def test_effective_map_merges_legacy_and_directory():
 
 @pytest.fixture()
 def emails_dir(tmp_path, monkeypatch):
-    import add_contributor
-
     d = tmp_path / "contributors" / "emails"
     monkeypatch.setattr(add_contributor, "EMAILS_DIR", d)
     return d
 
 
 def test_add_creates_mapping_file(emails_dir):
-    rc = add_contributor("new@example.com", "newperson", "PR #999 salvage")
+    email = "generated+new@example.invalid"
+    rc = add_contributor.add_contributor(email, "newperson", "PR #999 salvage")
     assert rc == 0
-    path = emails_dir / "new@example.com"
+    path = safe_mapping_path(emails_dir, email)
     assert path.is_file()
-    assert read_mapping_file(path) == "newperson"
-    assert "# PR #999 salvage" in path.read_text()
+    assert not (emails_dir / email).exists()
+    record = json.loads(path.read_text(encoding="utf-8"))
+    assert record == {
+        "email": email,
+        "login": "newperson",
+        "comment": "PR #999 salvage",
+    }
+    assert path.parent.name == "by-hash"
+    assert len(path.stem) == 64
+
+
+def test_safe_record_is_read_by_release_and_attribution_checks(emails_dir, monkeypatch):
+    email = "generated+audit@example.invalid"
+    assert add_contributor.add_contributor(email, "auditperson") == 0
+    contributor_map = authors._load_contributor_dir(emails_dir)
+    assert contributor_map[email] == "auditperson"
+
+    effective_map = {**authors_legacy.LEGACY_AUTHOR_MAP, **contributor_map}
+    monkeypatch.setattr(authors, "AUTHOR_MAP", effective_map)
+    monkeypatch.setattr(audit_pr_attribution, "AUTHOR_MAP", effective_map, raising=False)
+    monkeypatch.setattr(check_contributor_emails, "AUTHOR_MAP", effective_map, raising=False)
+    assert authors.resolve_author("Generated Author", email) == "@auditperson"
+    assert audit_pr_attribution.is_mapped(email)
+    assert check_contributor_emails.is_mapped(email, "")
 
 
 def test_add_refuses_login_conflicting_with_legacy_map(emails_dir):
     email, login = next(iter(authors_legacy.LEGACY_AUTHOR_MAP.items()))
-    assert add_contributor(email, login + "x") == 1
+    assert add_contributor.add_contributor(email, login + "x") == 1
     assert not (emails_dir / email).exists()
+    assert not safe_mapping_path(emails_dir, email).exists()
 
 
 def test_add_accepts_legacy_consecutive_hyphen_login(emails_dir):
-    # Legacy GitHub accounts with consecutive hyphens are real (Roger--Han);
-    # current signup rules forbid them but existing logins remain valid.
-    assert add_contributor("roger.hanhong@gmail.com", "Roger--Han") == 0
-    assert (emails_dir / "roger.hanhong@gmail.com").read_text(
-        encoding="utf-8"
-    ).strip().endswith("Roger--Han")
+    email = "generated+legacy@example.invalid"
+    assert add_contributor.add_contributor(email, "Legacy--Login") == 0
+    record = json.loads(safe_mapping_path(emails_dir, email).read_text(encoding="utf-8"))
+    assert record["login"] == "Legacy--Login"
 
 
 def test_add_strips_at_prefix(emails_dir):
-    assert add_contributor("z@z.com", "@zeta") == 0
-    assert read_mapping_file(emails_dir / "z@z.com") == "zeta"
+    email = "z@example.invalid"
+    assert add_contributor.add_contributor(email, "@zeta") == 0
+    assert authors._load_contributor_dir(emails_dir)[email] == "zeta"
 
 
 def test_cli_entrypoint_end_to_end(tmp_path):
@@ -95,6 +116,10 @@ def test_cli_entrypoint_end_to_end(tmp_path):
         (scripts / name).write_text(
             (SCRIPTS_DIR / name).read_text(encoding="utf-8"), encoding="utf-8"
         )
+    (scripts / "contributor_mappings.py").write_text(
+        (SCRIPTS_DIR / "contributor_mappings.py").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
     # Minimal stub author map so the legacy lookup import works
     (scripts / "releases").mkdir()
     (scripts / "releases" / "authors_legacy.py").write_text("LEGACY_AUTHOR_MAP = {}\n")
@@ -105,15 +130,13 @@ def test_cli_entrypoint_end_to_end(tmp_path):
         check=False,
     )
     assert proc.returncode == 0, proc.stderr
-    out = (tmp_path / "contributors" / "emails" / "cli@example.com").read_text(encoding="utf-8")
-    assert out.splitlines()[0] == "cliperson"
+    out = safe_mapping_path(
+        tmp_path / "contributors" / "emails", "cli@example.com"
+    )
+    assert json.loads(out.read_text(encoding="utf-8"))["login"] == "cliperson"
 
 
-# ── case-insensitive filename collisions ──────────────────────────────
-#
-# The mapping key IS the filename, so two emails differing only in case are the
-# same file on Windows and default macOS; add_contributor must refuse them.
-# scripts/check-case-collisions.py enforces the repo-wide invariant in CI.
+# ── compatibility with existing email-named records ───────────────────
 
 
 def test_add_contributor_refuses_case_collision_even_for_same_login(emails_dir, capsys):
@@ -122,16 +145,16 @@ def test_add_contributor_refuses_case_collision_even_for_same_login(emails_dir, 
     emails_dir.mkdir(parents=True)
     (emails_dir / "Foo@Example.com").write_text("foouser\n")
 
-    assert add_contributor("foo@example.com", "foouser") == 1
+    assert add_contributor.add_contributor("foo@example.com", "foouser") == 1
     assert "Foo@Example.com" in capsys.readouterr().err
     assert sorted(p.name for p in emails_dir.iterdir()) == ["Foo@Example.com"]
     # Exact-case re-add is the ordinary idempotent path.
-    assert add_contributor("Foo@Example.com", "foouser") == 0
+    assert add_contributor.add_contributor("Foo@Example.com", "foouser") == 0
 
 
 def test_case_collision_uses_casefold(emails_dir):
     # casefold, not lower: matches how macOS/Windows fold non-ASCII (ß ~ ss).
     emails_dir.mkdir(parents=True)
     (emails_dir / "strasse@example.com").write_text("someone\n")
-    assert add_contributor("STRASSE@example.com", "someone") == 1
-    assert add_contributor("straße@example.com", "someone") == 1
+    assert add_contributor.add_contributor("STRASSE@example.com", "someone") == 1
+    assert add_contributor.add_contributor("straße@example.com", "someone") == 1
