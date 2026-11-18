@@ -23,10 +23,11 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from scripts.ci.review_status import action_required, publish
-from scripts.releases.authors import AUTHOR_MAP
+from scripts.contributor_mappings import read_safe_mapping, safe_mapping_path
 
 ARTIFACT = "contributor-check"
 GIT_TIMEOUT = 120
+CONTRIBUTORS_EMAILS_DIR = Path("contributors/emails")
 LEGACY_MAP = Path("scripts/releases/authors_legacy.py")
 SKIPPED = ("*teknium*", "*noreply@github.com*", "*dependabot*", "*github-actions*",
            "*anthropic.com*", "*cursor.com*")
@@ -75,9 +76,11 @@ def is_mapped(email: str, legacy_map: str) -> bool:
         return True
     if GITHUB_NOREPLY.search(email):
         return True
-    if email in AUTHOR_MAP:
+    if f'"{email}"' in legacy_map:
         return True
-    return f'"{email}"' in legacy_map
+    if (CONTRIBUTORS_EMAILS_DIR / email).is_file():
+        return True
+    return read_safe_mapping(safe_mapping_path(CONTRIBUTORS_EMAILS_DIR, email), email) is not None
 
 
 def author_name(email: str) -> str:
