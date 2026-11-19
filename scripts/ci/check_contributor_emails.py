@@ -24,6 +24,7 @@ if __package__ in (None, ""):
 
 from scripts.ci.review_status import action_required, publish
 from scripts.contributor_mappings import read_safe_mapping, safe_mapping_path
+from scripts.releases.authors import AUTHOR_MAP
 
 ARTIFACT = "contributor-check"
 GIT_TIMEOUT = 120
@@ -75,6 +76,8 @@ def is_mapped(email: str, legacy_map: str) -> bool:
     if any(fnmatch.fnmatchcase(email, pattern) for pattern in SKIPPED):
         return True
     if GITHUB_NOREPLY.search(email):
+        return True
+    if email in AUTHOR_MAP:
         return True
     if f'"{email}"' in legacy_map:
         return True

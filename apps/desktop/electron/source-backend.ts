@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs'
 import path from 'node:path'
 
 import { buildDesktopBackendEnv } from './backend-env'
-import { execProbe, PROBE_TIMEOUT_MS } from './backend-probes'
+import { execProbe, isTimeoutError, PROBE_TIMEOUT_MS } from './backend-probes'
 import { resolveInstallationLauncher } from './updater-process'
 
 export interface SourceBackend {
@@ -15,6 +15,7 @@ export interface SourceBackend {
   bootstrap: false
   shell: boolean
   local: 'installed'
+  verification?: 'timed-out'
 }
 
 interface SourceOptions {
@@ -22,11 +23,22 @@ interface SourceOptions {
   env?: NodeJS.ProcessEnv
 }
 
-/** Keep the validated command. PM owns interpreter and generation selection. */
+interface SourceInstallationOptions extends SourceOptions {
+  hermesHome?: string
+  probe?: typeof execProbe
+}
+
+/** Recovery needs a verified launcher; startup may also try a timed-out launcher. */
+export async function isSourceRuntimeUsable(root: string, options: SourceInstallationOptions = {}): Promise<boolean> {
+  const backend = await resolveSourceInstallationBackend(root, [], options)
+  return backend !== null && backend.verification === undefined
+}
+
+/** Keep the installation launcher. PM owns interpreter and generation selection. */
 export async function resolveSourceInstallationBackend(
   root: string,
   args: string[],
-  options: SourceOptions & { hermesHome?: string } = {}
+  options: SourceInstallationOptions = {}
 ): Promise<SourceBackend | null> {
   if (!existsSync(path.join(root, 'hermes_cli', 'main.py'))) {
     return null
@@ -42,9 +54,10 @@ export async function resolveSourceInstallationBackend(
   const shell: boolean = isWindows && /\.(cmd|bat)$/i.test(launcher)
   const command: string = shell ? `"${launcher}"` : launcher
   const env: NodeJS.ProcessEnv = buildDesktopBackendEnv({ currentEnv: options.env ?? process.env })
+  let verification: SourceBackend['verification']
 
   try {
-    await execProbe(command, ['--version'], {
+    await (options.probe ?? execProbe)(command, ['--version'], {
       cwd: root,
       env: { ...process.env, ...options.env, ...env },
       shell,
@@ -52,8 +65,13 @@ export async function resolveSourceInstallationBackend(
       timeout: PROBE_TIMEOUT_MS,
       windowsHide: true
     })
-  } catch {
-    return null
+  } catch (error) {
+    if (!isTimeoutError(error)) {
+      return null
+    }
+
+    // The bounded retry also timed out. Use the existing startup path instead of bootstrap.
+    verification = 'timed-out'
   }
 
   return {
@@ -65,7 +83,8 @@ export async function resolveSourceInstallationBackend(
     root,
     bootstrap: false,
     shell,
-    local: 'installed'
+    local: 'installed',
+    ...(verification ? { verification } : {})
   }
 }
 

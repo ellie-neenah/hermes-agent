@@ -74,9 +74,7 @@ def test_safe_record_is_read_by_release_and_attribution_checks(emails_dir, monke
     email = "generated+audit@example.invalid"
     monkeypatch.chdir(emails_dir.parent.parent)
     with monkeypatch.context() as script_checkout:
-        script_checkout.setattr(
-            check_contributor_emails, "AUTHOR_MAP", {email: "auditperson"}, raising=False
-        )
+        script_checkout.setattr(check_contributor_emails, "AUTHOR_MAP", {}, raising=False)
         assert not check_contributor_emails.is_mapped(email, "")
         assert check_contributor_emails.is_mapped(email, f'{{"{email}": "auditperson"}}')
 
@@ -87,6 +85,7 @@ def test_safe_record_is_read_by_release_and_attribution_checks(emails_dir, monke
     effective_map = {**authors_legacy.LEGACY_AUTHOR_MAP, **contributor_map}
     monkeypatch.setattr(authors, "AUTHOR_MAP", effective_map)
     monkeypatch.setattr(audit_pr_attribution, "AUTHOR_MAP", effective_map, raising=False)
+    monkeypatch.setattr(check_contributor_emails, "AUTHOR_MAP", effective_map, raising=False)
     assert authors.resolve_author("Generated Author", email) == "@auditperson"
     assert audit_pr_attribution.is_mapped(email)
     assert check_contributor_emails.is_mapped(email, "")
