@@ -72,6 +72,12 @@ def test_add_creates_mapping_file(emails_dir):
 
 def test_safe_record_is_read_by_release_and_attribution_checks(emails_dir, monkeypatch):
     email = "generated+audit@example.invalid"
+    monkeypatch.chdir(emails_dir.parent.parent)
+    with monkeypatch.context() as script_checkout:
+        script_checkout.setattr(check_contributor_emails, "AUTHOR_MAP", {}, raising=False)
+        assert not check_contributor_emails.is_mapped(email, "")
+        assert check_contributor_emails.is_mapped(email, f'{{"{email}": "auditperson"}}')
+
     assert add_contributor.add_contributor(email, "auditperson") == 0
     contributor_map = authors._load_contributor_dir(emails_dir)
     assert contributor_map[email] == "auditperson"
@@ -82,6 +88,15 @@ def test_safe_record_is_read_by_release_and_attribution_checks(emails_dir, monke
     monkeypatch.setattr(check_contributor_emails, "AUTHOR_MAP", effective_map, raising=False)
     assert authors.resolve_author("Generated Author", email) == "@auditperson"
     assert audit_pr_attribution.is_mapped(email)
+    assert check_contributor_emails.is_mapped(email, "")
+
+
+def test_guard_accepts_empty_legacy_mapping_file(emails_dir, monkeypatch):
+    email = "empty-legacy@example.invalid"
+    monkeypatch.chdir(emails_dir.parent.parent)
+    emails_dir.mkdir(parents=True)
+    (emails_dir / email).touch()
+
     assert check_contributor_emails.is_mapped(email, "")
 
 
