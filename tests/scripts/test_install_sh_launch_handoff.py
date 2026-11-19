@@ -62,31 +62,57 @@ def test_installer_post_pm_stages(tmp_path: Path, stage: str, expected: list[str
 
 
 @pytest.mark.platforms('posix')
-@pytest.mark.parametrize('stage, include_desktop, expected_desktop', [
-    ('products', False, False), ('products', True, True), ('desktop', False, True),
+@pytest.mark.parametrize('stage, include_desktop, expected_desktop, build_fails', [
+    ('products', False, False, False),
+    ('products', True, True, False),
+    ('desktop', False, True, False),
+    pytest.param('products', True, True, True, id='desktop-build-failure-no-python-fallback'),
 ])
 def test_products_and_desktop_stages_share_the_completion_tail(tmp_path: Path, stage: str,
-                                                                include_desktop: bool, expected_desktop: bool) -> None:
+                                                                include_desktop: bool, expected_desktop: bool,
+                                                                build_fails: bool) -> None:
     """Both stages hand the checkout to hermes_cli/source_completion.py; --include-desktop
-    (or the external `desktop` stage) only adds --desktop to that one call."""
+    (or the external `desktop` stage) adds --desktop. A failed Desktop build is not retried
+    with a legacy Python (ellie-neenah/hermes-agent#4)."""
     install = tmp_path / 'source tree'
     calls = tmp_path / 'calls.json'
+    build_error = 'error: Desktop packaging fixture failed to write the bundle'
     (install / 'hermes_cli').mkdir(parents=True)
     (install / 'hermes_cli' / 'source_completion.py').write_text(
         "import json, os, sys\nfrom pathlib import Path\n"
-        "Path(os.environ['CALLS']).write_text(json.dumps(sys.argv[1:]))\n", encoding='utf-8')
+        "with Path(os.environ['CALLS']).open('a', encoding='utf-8') as stream:\n"
+        "    stream.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+        "if '--desktop' in sys.argv and os.environ.get('BUILD_ERROR'):\n"
+        "    print(os.environ['BUILD_ERROR'], file=sys.stderr)\n"
+        "    sys.exit(7)\n",
+        encoding='utf-8',
+    )
+    legacy_calls = tmp_path / 'legacy-calls'
+    bin_dir = tmp_path / 'bin'
+    for candidate in (bin_dir / 'python', bin_dir / 'python3', install / 'venv/bin/python',
+                      install / '.venv/bin/python'):
+        candidate.parent.mkdir(parents=True, exist_ok=True)
+        candidate.write_text('#!/bin/sh\nprintf "%s\\n" "$0" >> "$LEGACY_CALLS"\nexit 0\n',
+                             encoding='utf-8')
+        candidate.chmod(0o755)
     flag = 'true' if include_desktop else 'false'
     command = ['bash', '-c',
-               f'source "$1" --manifest >/dev/null; INSTALL_DIR="$2"; INCLUDE_DESKTOP={flag}; '
-               'bootstrap_python() { boot_py="$PYTHON_FOR_TEST"; }; "stage_$3"',
+               (f'source "$1" --manifest >/dev/null; INSTALL_DIR="$2"; INCLUDE_DESKTOP={flag}; '
+                'bootstrap_python() { boot_py="$PYTHON_FOR_TEST"; }; "stage_$3"'),
                'test', str(ROOT / 'scripts/install.sh'), str(install), stage]
-    env = {**os.environ, 'HOME': str(tmp_path), 'HERMES_HOME': str(tmp_path / 'home'),
-           'HERMES_RUNTIME_DIR': str(tmp_path / 'store'), 'CALLS': str(calls), 'PYTHON_FOR_TEST': sys.executable}
-    result = subprocess.run(command, cwd=tmp_path, env=env, capture_output=True, text=True, timeout=20, check=False)
-    assert result.returncode == 0, result.stdout + result.stderr
-    argv = json.loads(calls.read_text())
-    assert argv[:2] == ['--source', str(install)]
-    assert ('--desktop' in argv) is expected_desktop
+    env = {'HOME': str(tmp_path), 'HERMES_HOME': str(tmp_path / 'home'), 'TMPDIR': str(tmp_path),
+           'PATH': os.pathsep.join((str(bin_dir), os.defpath)), 'CALLS': str(calls),
+           'HERMES_RUNTIME_DIR': str(tmp_path / 'store'), 'PYTHON_FOR_TEST': sys.executable,
+           'LEGACY_CALLS': str(legacy_calls), 'BUILD_ERROR': build_error if build_fails else ''}
+    result = subprocess.run(command, cwd=tmp_path, env=env, capture_output=True, text=True,
+                            encoding='utf-8', timeout=20, check=False)
+    assert not legacy_calls.exists(), f'legacy Python was invoked:\n{legacy_calls.read_text(encoding="utf-8")}'
+    assert result.returncode == int(build_fails), result.stdout + result.stderr
+    expected_args = ['--source', str(install)] + (['--desktop'] if expected_desktop else [])
+    assert [json.loads(line) for line in calls.read_text(encoding='utf-8').splitlines()] == [expected_args]
+    assert ('app products and hermes command ready' in result.stdout) is not build_fails
+    if build_fails:
+        assert build_error in result.stderr
 
 
 @pytest.mark.platforms("posix")

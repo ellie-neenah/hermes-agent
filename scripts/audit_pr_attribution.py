@@ -12,14 +12,13 @@ Logic (kept in sync with that repo-guards.yml step):
   - scans ``git log $(git merge-base origin/main HEAD)..HEAD --format=%ae``
   - skips teknium/bot emails and ``<id>+<login>@users.noreply.github.com``
     (CI auto-resolves those)
-  - everything else must have ``contributors/emails/<email>`` or a legacy
-    AUTHOR_MAP entry in scripts/releases/authors_legacy.py
+  - everything else must have a contributor mapping or a legacy AUTHOR_MAP
+    entry in scripts/releases/authors_legacy.py
 
 ``--fix`` resolution order for an unmapped email:
   1. bare ``<login>@users.noreply.github.com`` → ``<login>``, verified via
-     ``gh api users/<login>``. A warning is printed: the local part is
-     *usually* the GitHub login but is user-controlled (the historical
-     ``bryan@…`` → ``hydraxman`` case) — eyeball it against the PR author.
+     ``gh api users/<login>``. A warning is printed because the local part is
+     user-controlled — verify it against the PR author.
   2. ``gh api 'search/users?q=<email>+in:email'``
   3. otherwise: prints the manual ``add_contributor.py`` command and exits 1.
 """
@@ -32,6 +31,11 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+if __package__ in (None, ""):
+    sys.path.insert(0, str(REPO_ROOT))
+
+from scripts.releases.authors import AUTHOR_MAP  # noqa: E402
 
 SKIP_SUBSTRINGS = (
     "teknium",
@@ -67,15 +71,7 @@ def is_mapped(email: str) -> bool:
         return True
     if ID_NOREPLY_RE.search(email):
         return True
-    if (REPO_ROOT / "contributors" / "emails" / email).is_file():
-        return True
-    authors_py = REPO_ROOT / "scripts" / "releases" / "authors_legacy.py"
-    try:
-        if f'"{email}"' in authors_py.read_text(encoding="utf-8-sig", errors="replace"):
-            return True
-    except OSError:
-        pass
-    return False
+    return email in AUTHOR_MAP
 
 
 def gh_json(*args: str):

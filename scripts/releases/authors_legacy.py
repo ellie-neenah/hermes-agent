@@ -1,14 +1,13 @@
 """Frozen legacy commit-email → GitHub login mappings. Data only; never append.
 
-The contributor-email step of the repo-guards CI job and ``scripts/audit_pr_attribution.py`` grep this
-file for ``"<email>"``, so the entries must stay a literal dict here.
+Release attribution and contributor checks merge these entries with the current
+records in ``contributors/emails/``.
 """
 
 # FROZEN legacy mappings — do NOT add new entries here. New contributor
-# mappings live as one-file-per-email entries under contributors/emails/
-# (see contributors/README.md), which merge-conflict-free by construction.
+# mappings are managed by scripts/add_contributor.py (see contributors/README.md).
 # This dict is kept only so existing history keeps resolving; the effective
-# AUTHOR_MAP in authors.py merges it with the directory (directory wins).
+# AUTHOR_MAP in authors.py merges it with contributor records.
 LEGACY_AUTHOR_MAP = {
     "declanbatesmith@outlook.com": "cat-thats-fat",  # PR #60489 (desktop: first-run remote connection option)
     "drbs2004@me.com": "cat-thats-fat",  # PR #60489 (desktop: first-run remote connection option; historical merge email)
